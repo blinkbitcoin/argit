@@ -10,9 +10,10 @@ import pytest
 
 from argit.errors import ArgitError
 from argit.manifest import find_manifest_file, load_manifest, parse_filename
+from argit.setup import _bundled_manifest_path
 
 
-BUNDLED = Path(str(resources.files("argit.manifest_templates").joinpath("openclaw-2026.4.14-1.manifest.json")))
+BUNDLED = _bundled_manifest_path()
 
 
 def _init_repo(tmp_path: Path, manifest_body: dict | str, filename: str) -> Path:
@@ -44,7 +45,7 @@ def test_happy_path(tmp_path):
     m = load_manifest(repo)
     assert m.agent_type == "openclaw"
     assert m.agent_version == "2026.4.14"
-    assert m.manifest_revision == 1
+    assert m.manifest_revision == body["manifest_revision"]
     assert m.schema_version == 1
     assert len(m.sanitize) == 2
     assert m.lifecycle is not None
@@ -88,12 +89,45 @@ def test_zero_manifests(tmp_path):
     assert "no manifest" in str(exc.value).lower()
 
 
+def test_all_bundled_revisions_parse_cleanly(tmp_path):
+    """Every shipped manifest revision parses without error and matches its
+    own filename. Catches bundled-manifest regressions."""
+    from argit.setup import _all_bundled_manifest_paths
+
+    bundled = _all_bundled_manifest_paths()
+    assert len(bundled) >= 1, "expected at least one bundled manifest"
+    for path in bundled:
+        # Stage each revision in isolation in its own tmpdir.
+        d = tmp_path / path.stem
+        d.mkdir()
+        (d / ".git").mkdir()
+        (d / ".argit" / "manifest").mkdir(parents=True)
+        (d / ".argit" / "manifest" / path.name).write_text(path.read_text())
+        m = load_manifest(d)
+        assert m.filename == path.name
+
+
+def test_bundled_manifest_path_picks_latest_revision():
+    """`_bundled_manifest_path()` should return the highest-revision
+    bundled manifest for the agent_type+agent_version pair."""
+    from argit.setup import _all_bundled_manifest_paths, _bundled_manifest_path
+
+    latest = _bundled_manifest_path()
+    all_revisions = _all_bundled_manifest_paths()
+    # latest must be one of the shipped paths and have the highest revision number
+    revisions = [parse_filename(p.name)[2] for p in all_revisions]
+    assert parse_filename(latest.name)[2] == max(revisions)
+
+
 def test_two_manifests(tmp_path):
+    """Two arbitrary manifest files in `.argit/manifest/` → fatal error."""
     (tmp_path / ".git").mkdir()
     (tmp_path / ".argit" / "manifest").mkdir(parents=True)
     body = BUNDLED.read_text()
-    (tmp_path / ".argit" / "manifest" / BUNDLED.name).write_text(body)
-    (tmp_path / ".argit" / "manifest" / "openclaw-2026.4.14-2.manifest.json").write_text(body)
+    # Stage two distinct revisions; we don't care about body validity here —
+    # only that find_manifest_file rejects the multi-file state.
+    (tmp_path / ".argit" / "manifest" / "openclaw-2026.4.14-7.manifest.json").write_text(body)
+    (tmp_path / ".argit" / "manifest" / "openclaw-2026.4.14-9.manifest.json").write_text(body)
     with pytest.raises(ArgitError) as exc:
         find_manifest_file(tmp_path)
     assert "multiple" in str(exc.value).lower()

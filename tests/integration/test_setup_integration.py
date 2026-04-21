@@ -56,8 +56,9 @@ def test_setup_happy_path(tmp_path, gnupg_home, ephemeral_gpg_key):
     cp = _argit(["setup", "--yes"], cwd=repo, env=env)
     assert cp.returncode == 0, f"stdout={cp.stdout}\nstderr={cp.stderr}"
 
-    # AC 1: artifacts present
-    assert (repo / ".argit" / "manifest" / "openclaw-2026.4.14-1.manifest.json").is_file()
+    # AC 1: artifacts present (latest bundled revision)
+    from argit.setup import _bundled_manifest_path
+    assert (repo / ".argit" / "manifest" / _bundled_manifest_path().name).is_file()
     assert "openclaw/media/**" in (repo / ".gitattributes").read_text()
     assert (repo / "secrets").is_dir()
     assert not (repo / "secrets" / ".gpg-id").exists()

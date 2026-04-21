@@ -11,9 +11,10 @@ from click.testing import CliRunner
 
 from argit.cli import _cli
 from argit.gpgwrap import GpgKey
+from argit.setup import _bundled_manifest_path
 from argit.shared import IT_BACKUP_FPR
 
-BUNDLED = Path(str(resources.files("argit.manifest_templates").joinpath("openclaw-2026.4.14-1.manifest.json")))
+BUNDLED = _bundled_manifest_path()
 
 
 def _stub_subprocess_run():

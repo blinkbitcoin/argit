@@ -47,9 +47,37 @@ def _already(message: str) -> None:
     click.echo(f"= {message}")
 
 
-def _bundled_manifest_path() -> Path:
-    res = resources.files("argit.manifest_templates").joinpath("openclaw-2026.4.14-1.manifest.json")
-    return Path(str(res))
+def _bundled_manifest_path(agent_type: str = "openclaw", agent_version: str = "2026.4.14") -> Path:
+    """Return the highest-revision bundled manifest for a given
+    (agent_type, agent_version). Older revisions remain shipped for audit
+    trail and as the hash catalog QS4 (issue #1) will consume.
+    """
+    pkg = resources.files("argit.manifest_templates")
+    prefix = f"{agent_type}-{agent_version}-"
+    suffix = ".manifest.json"
+    candidates: list[tuple[int, Path]] = []
+    for entry in pkg.iterdir():
+        name = entry.name
+        if name.startswith(prefix) and name.endswith(suffix):
+            rev_str = name[len(prefix):-len(suffix)]
+            try:
+                rev = int(rev_str)
+            except ValueError:
+                continue
+            candidates.append((rev, Path(str(entry))))
+    if not candidates:
+        raise ArgitError(
+            f"no bundled manifest found for {agent_type}-{agent_version}",
+            "verify the argit installation; manifest templates should ship inside the package",
+        )
+    return max(candidates)[1]
+
+
+def _all_bundled_manifest_paths() -> list[Path]:
+    """Every bundled manifest revision — used by QS4 (manifest-update) to
+    compute the known-hash catalog."""
+    pkg = resources.files("argit.manifest_templates")
+    return sorted(Path(str(e)) for e in pkg.iterdir() if e.name.endswith(".manifest.json"))
 
 
 def _bundled_it_key_path() -> Path:
@@ -61,8 +89,22 @@ def _ensure_manifest(repo_root: Path, dry_run: bool) -> bool:
     manifest_dir = repo_root / ".argit" / "manifest"
     bundled = _bundled_manifest_path()
     target = manifest_dir / bundled.name
-    if target.exists():
-        _already(f"manifest already present: {target.relative_to(repo_root)}")
+    # Skip if ANY openclaw manifest revision is already present — repos pinned
+    # to an older revision keep that pin until QS4 (issue #1) ships a proper
+    # upgrade flow. Copying the bundled file alongside an existing different
+    # revision would create two manifests in `.argit/manifest/` and break the
+    # "exactly one manifest per repo" invariant on the next argit invocation.
+    existing = sorted(manifest_dir.glob("*.manifest.json")) if manifest_dir.is_dir() else []
+    if existing:
+        names = ", ".join(p.name for p in existing)
+        if any(p.name == bundled.name for p in existing):
+            _already(f"manifest already present: {target.relative_to(repo_root)}")
+        else:
+            _already(
+                f"manifest already present at older revision ({names}); "
+                f"bundled is {bundled.name}. Upgrade not auto-applied (see "
+                "https://github.com/blinkbitcoin/argit/issues/1)."
+            )
         return False
     if dry_run:
         _emit(True, f"copy bundled manifest → {target.relative_to(repo_root)}")

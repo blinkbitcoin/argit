@@ -12,9 +12,11 @@ from pathlib import Path
 
 import pytest
 
+from argit.setup import _bundled_manifest_path
+
 from .conftest import git_init_repo
 
-BUNDLED = Path(str(resources.files("argit.manifest_templates").joinpath("openclaw-2026.4.14-1.manifest.json")))
+BUNDLED = _bundled_manifest_path()
 SRC_ROOT = Path(__file__).resolve().parents[2] / "src"
 
 
@@ -152,7 +154,7 @@ def test_restore_verify_catches_lfs_pointer(tmp_path, gnupg_home, ephemeral_gpg_
     repo, env = _setup_repo_and_backup(tmp_path, gnupg_home, ephemeral_gpg_key)
 
     # Inject a kind:blob item with a pointer-file in its repo target.
-    manifest_path = repo / ".argit" / "manifest" / "openclaw-2026.4.14-1.manifest.json"
+    manifest_path = repo / ".argit" / "manifest" / BUNDLED.name
     body = _json.loads(manifest_path.read_text())
     body["items"].append({
         "kind": "blob",

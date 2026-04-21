@@ -47,11 +47,11 @@ def test_setup_dryrun_partially_set_up(mock_gpg, tmp_path):
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=str(tmp_path)) as cwd:
         Path(cwd, ".git").mkdir()
-        # Pre-seed manifest dir + bundled manifest
-        from importlib import resources
+        # Pre-seed manifest dir + bundled manifest (latest revision)
+        from argit.setup import _bundled_manifest_path
         mdir = Path(cwd, ".argit", "manifest")
         mdir.mkdir(parents=True)
-        bundled = Path(str(resources.files("argit.manifest_templates").joinpath("openclaw-2026.4.14-1.manifest.json")))
+        bundled = _bundled_manifest_path()
         (mdir / bundled.name).write_text(bundled.read_text())
         # Pre-seed gitignore + gitattributes + secrets dir
         Path(cwd, ".gitignore").write_text(".argit/in-progress\n.argit/lock\n")
