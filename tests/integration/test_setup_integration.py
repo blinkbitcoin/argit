@@ -1,0 +1,111 @@
+"""Integration: argit setup against an ephemeral GPG keyring."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from .conftest import git_init_repo
+
+SRC_ROOT = Path(__file__).resolve().parents[2] / "src"
+
+
+def _argit(args: list[str], cwd: Path, env: dict[str, str]) -> subprocess.CompletedProcess:
+    pythonpath = str(SRC_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+    return subprocess.run(
+        [sys.executable, "-m", "argit.cli", *args],
+        cwd=str(cwd),
+        env={**env, "PYTHONPATH": pythonpath},
+        capture_output=True, text=True, timeout=60,
+    )
+
+
+def _generate_extra_key(gnupg_home: Path, name: str) -> str:
+    batch = f"""
+%no-protection
+Key-Type: RSA
+Key-Length: 2048
+Name-Real: {name}
+Name-Email: {name}@example.invalid
+Expire-Date: 0
+%commit
+"""
+    subprocess.run(
+        ["gpg", "--batch", "--pinentry-mode", "loopback", "--gen-key"],
+        input=batch, capture_output=True, text=True, timeout=120, check=True,
+        env={**os.environ, "GNUPGHOME": str(gnupg_home)},
+    )
+    cp = subprocess.run(
+        ["gpg", "--list-keys", "--with-colons"],
+        capture_output=True, text=True, check=True,
+        env={**os.environ, "GNUPGHOME": str(gnupg_home)},
+    )
+    fprs = [line.split(":")[9] for line in cp.stdout.splitlines() if line.startswith("fpr:")]
+    return fprs[-1]
+
+
+def test_setup_happy_path(tmp_path, gnupg_home, ephemeral_gpg_key):
+    repo = tmp_path / "repo"; repo.mkdir()
+    git_init_repo(repo)
+    env = {**os.environ, "GNUPGHOME": str(gnupg_home)}
+
+    cp = _argit(["setup", "--yes"], cwd=repo, env=env)
+    assert cp.returncode == 0, f"stdout={cp.stdout}\nstderr={cp.stderr}"
+
+    # AC 1: artifacts present
+    assert (repo / ".argit" / "manifest" / "openclaw-2026.4.14-1.manifest.json").is_file()
+    assert "openclaw/media/**" in (repo / ".gitattributes").read_text()
+    assert (repo / "secrets").is_dir()
+    assert not (repo / "secrets" / ".gpg-id").exists()
+    # IT key import would be attempted but the bundled .asc may collide with ephemeral key — verify presence regardless
+    cp_keys = subprocess.run(["gpg", "--list-keys", "--with-colons"], env=env, capture_output=True, text=True, check=True)
+    assert "1107BD74F292CD3EAB0CF59D49F2D3353A88D34E" in cp_keys.stdout
+    # pass init hint printed
+    assert "PASSWORD_STORE_DIR=. pass init" in cp.stdout
+
+
+def test_setup_idempotent(tmp_path, gnupg_home, ephemeral_gpg_key):
+    repo = tmp_path / "repo"; repo.mkdir()
+    git_init_repo(repo)
+    env = {**os.environ, "GNUPGHOME": str(gnupg_home)}
+
+    cp1 = _argit(["setup", "--yes"], cwd=repo, env=env)
+    assert cp1.returncode == 0
+    cp2 = _argit(["setup", "--yes"], cwd=repo, env=env)
+    assert cp2.returncode == 0
+    # Second invocation should report "already" for everything mutating
+    assert "manifest already present" in cp2.stdout
+    assert "already has the LFS line" in cp2.stdout
+    assert "secrets/ already exists" in cp2.stdout
+    assert "IT backup key already imported" in cp2.stdout
+
+
+def test_setup_multi_key_requires_agent_key(tmp_path, gnupg_home, ephemeral_gpg_key):
+    """AC 4: two personal keys, no --agent-key → exit 1 with candidate list."""
+    repo = tmp_path / "repo"; repo.mkdir()
+    git_init_repo(repo)
+    env = {**os.environ, "GNUPGHOME": str(gnupg_home)}
+
+    second_fpr = _generate_extra_key(gnupg_home, "argit-second")
+
+    cp = _argit(["setup", "--yes"], cwd=repo, env=env)
+    assert cp.returncode != 0
+    assert "multiple personal GPG keys" in (cp.stdout + cp.stderr)
+    assert "--agent-key" in (cp.stdout + cp.stderr)
+
+
+def test_setup_with_explicit_agent_key(tmp_path, gnupg_home, ephemeral_gpg_key):
+    """AC 5: --agent-key picks the requested key."""
+    repo = tmp_path / "repo"; repo.mkdir()
+    git_init_repo(repo)
+    env = {**os.environ, "GNUPGHOME": str(gnupg_home)}
+
+    second_fpr = _generate_extra_key(gnupg_home, "argit-second")
+
+    cp = _argit(["setup", "--yes", "--agent-key", second_fpr], cwd=repo, env=env)
+    assert cp.returncode == 0, f"stdout={cp.stdout}\nstderr={cp.stderr}"
+    assert second_fpr in cp.stdout
