@@ -195,26 +195,31 @@ def run_backup(repo_root: Path, *, commit: bool, push: bool, strict: bool, dry_r
     secrets_before = set(pass_wrap.ls())
 
     with acquire_lock(repo_root):
-        with in_progress_marker(repo_root):
-            # 2. Unspecified-files walk
-            unspecified: list[str] = []
-            for rel in _walk_relative(source_root):
-                if _matches_exclude(rel, manifest.exclude):
-                    continue
-                if _covered_by_items(rel, manifest.items):
-                    continue
-                if _covered_by_sanitize(rel, manifest.sanitize):
-                    continue
-                unspecified.append(str(rel))
-            if unspecified:
-                if strict:
-                    raise ArgitError(
-                        "unspecified files in source_root (--strict):\n  " + "\n  ".join(unspecified),
-                        "install a plugin manifest or extend this one",
-                    )
-                for p in unspecified:
-                    _warn(f"not backed up: {p} — not in manifest")
+        # 2. Unspecified-files walk — READ ONLY; failures here leave no
+        # partial state, so we stay outside the in-progress marker.
+        unspecified: list[str] = []
+        for rel in _walk_relative(source_root):
+            if _matches_exclude(rel, manifest.exclude):
+                continue
+            if _covered_by_items(rel, manifest.items):
+                continue
+            if _covered_by_sanitize(rel, manifest.sanitize):
+                continue
+            unspecified.append(str(rel))
+        if unspecified:
+            if strict:
+                raise ArgitError(
+                    "unspecified files in source_root (--strict):\n  " + "\n  ".join(unspecified),
+                    "install a plugin manifest or extend this one",
+                )
+            for p in unspecified:
+                _warn(f"not backed up: {p} — not in manifest")
 
+        # The marker enters HERE — right before the first mutating phase.
+        # Preflight, unspecified-files walk, and version-check are all read-
+        # only; failing in those should not force the operator to manually
+        # delete `.argit/in-progress` before retrying.
+        with in_progress_marker(repo_root):
             # 3. Sanitize
             for sf in manifest.sanitize:
                 src_file = source_root / sf.file

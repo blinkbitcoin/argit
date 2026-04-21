@@ -193,22 +193,28 @@ def run_restore(repo_root: Path, *, target: str | None, overwrite: bool, merge: 
     _maybe_warn_cross_instance(repo_root, dry_run, yes)
 
     with acquire_lock(repo_root):
-        with in_progress_marker(repo_root):
-            # 2. Lifecycle running-check
-            if not skip_lifecycle and manifest.lifecycle is not None:
-                life = manifest.lifecycle
-                running = _detect_running(life, dry_run)
-                if running:
-                    if force:
-                        _warn("Restoring while agent is running — corruption possible")
-                    elif life.stop is not None:
-                        _stop_and_wait(life, dry_run)
-                    else:
-                        raise ArgitError(
-                            f"agent is running but manifest has no lifecycle.stop",
-                            "stop it manually, then retry, or pass --force to proceed anyway",
-                        )
+        # 2. Lifecycle running-check. Detect_running is read-only; lifecycle.stop
+        # mutates the agent process (not the repo/target). Failures here leave
+        # the working tree and target dir unchanged, so the partial-state
+        # marker is not needed yet.
+        if not skip_lifecycle and manifest.lifecycle is not None:
+            life = manifest.lifecycle
+            running = _detect_running(life, dry_run)
+            if running:
+                if force:
+                    _warn("Restoring while agent is running — corruption possible")
+                elif life.stop is not None:
+                    _stop_and_wait(life, dry_run)
+                else:
+                    raise ArgitError(
+                        f"agent is running but manifest has no lifecycle.stop",
+                        "stop it manually, then retry, or pass --force to proceed anyway",
+                    )
 
+        # The marker enters HERE — right before the first mutation of the
+        # target directory. Preflight, lifecycle detect/stop, and target
+        # resolution are non-destructive to the backup repo and target dir.
+        with in_progress_marker(repo_root):
             # 3. Target resolution
             if target_path.exists() and any(target_path.iterdir()):
                 if overwrite:
