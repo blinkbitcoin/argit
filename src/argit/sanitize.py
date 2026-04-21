@@ -62,23 +62,27 @@ def _placeholder(pass_path: str) -> str:
     return f"${{pass:{pass_path}}}"
 
 
-def sanitize(config: dict, rules: list[SanitizeRule]) -> tuple[dict, dict[str, str]]:
-    """Returns (sanitized_config, {pass_path: value_to_store}).
+def sanitize(config: dict, rules: list[SanitizeRule]) -> tuple[dict, dict[str, str], list[SanitizeRule]]:
+    """Returns (sanitized_config, {pass_path: value_to_store}, skipped_rules).
 
     Subtree rules JSON-serialize the subtree (sorted keys, no whitespace); leaf
-    rules `str()`-coerce the leaf. Missing paths raise ArgitError so author
-    typos are loud — sanitize-time is the right place to catch them.
+    rules `str()`-coerce the leaf. A rule whose path is not present in the
+    source is returned in `skipped_rules` — the caller should warn and
+    continue. This matches the same "skip-with-log if source missing" pattern
+    kind:secret items use, and accommodates real-world configs that omit
+    optional subsystems (no Telegram → no `.channels.telegram.botToken`).
+    Author typos still surface — a missing path is a skip, not silently
+    ignored, and the warning names the offending rule.
     """
     out = copy.deepcopy(config)
     extracted: dict[str, str] = {}
+    skipped: list[SanitizeRule] = []
     for rule in rules:
         try:
             value = resolve(out, rule.path)
-        except KeyError as exc:
-            raise ArgitError(
-                f"sanitize path '{rule.path}' not present in source",
-                "remove the rule from the manifest, or fix the path; the source file may have changed schema",
-            ) from exc
+        except KeyError:
+            skipped.append(rule)
+            continue
         if rule.subtree:
             extracted[rule.pass_path] = json.dumps(value, sort_keys=True, separators=(",", ":"))
         else:
@@ -89,7 +93,7 @@ def sanitize(config: dict, rules: list[SanitizeRule]) -> tuple[dict, dict[str, s
                 )
             extracted[rule.pass_path] = "" if value is None else str(value)
         _set_path(out, rule.path, _placeholder(rule.pass_path))
-    return out, extracted
+    return out, extracted, skipped
 
 
 def reinject(sanitized: dict, secret_lookup: Callable[[str], str]) -> dict:

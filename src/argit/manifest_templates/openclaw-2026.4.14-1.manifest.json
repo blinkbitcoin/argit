@@ -5,11 +5,16 @@
   "exclude": [
     "openclaw.json.bak*",
     "agents/main/sessions/",
+    "browser/",
     "completions/",
+    "cron/runs/",
+    "delivery-queue/",
+    "extensions/",
     "logs/",
     "*.sqlite-wal",
     "*.sqlite-shm",
-    "qqbot/"
+    "qqbot/",
+    "workspace"
   ],
   "items": [
     { "kind": "secret", "mode": "0600", "pass": "argit/openclaw/identity/device", "source": "identity/device.json" },

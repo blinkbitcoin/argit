@@ -231,7 +231,7 @@ def run_backup(repo_root: Path, *, commit: bool, push: bool, strict: bool, dry_r
                         f"sanitize source {sf.file} is not valid JSON: {exc.msg} (line {exc.lineno})",
                         "fix the JSON or remove the rule",
                     ) from exc
-                sanitized, extracted = run_sanitize(config, sf.rules)
+                sanitized, extracted, skipped = run_sanitize(config, sf.rules)
                 target_path = repo_root / sf.target
                 target_path.parent.mkdir(parents=True, exist_ok=True)
                 target_path.write_text(
@@ -241,7 +241,9 @@ def run_backup(repo_root: Path, *, commit: bool, push: bool, strict: bool, dry_r
                 _check_chmod(target_path, sf.mode)
                 for pp, val in extracted.items():
                     pass_wrap.insert(pp, val)
-                _emit(False, f"sanitize: {sf.file} ({len(sf.rules)} secrets → pass)")
+                for sr in skipped:
+                    _warn(f"sanitize path '{sr.path}' not present in {sf.file} (skipping rule)")
+                _emit(False, f"sanitize: {sf.file} ({len(extracted)}/{len(sf.rules)} rules → pass)")
 
             # 4. Whole-file secrets
             for it in [i for i in manifest.items if i.kind == "secret"]:
