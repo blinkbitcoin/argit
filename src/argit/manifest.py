@@ -348,6 +348,224 @@ def _check_target_ambiguity(items: list[Item], source_label: str) -> None:
                 )
 
 
+_IDENTITY_FIELDS = {
+    "schema_version", "agent_type", "agent_version", "manifest_revision",
+    "source_root", "source_root_mode",
+}
+
+
+def _find_overlay(manifest_path: Path) -> Path | None:
+    """Return the sibling `<basename>.manifest.local.json` if it exists.
+
+    Convention: `.argit/manifest/foo.manifest.json` → sibling
+    `.argit/manifest/foo.manifest.local.json`. Absent → None (no overlay).
+    """
+    # `<basename>.manifest.json` → replace final `.manifest.json` with
+    # `.manifest.local.json`. Basename split via `with_suffix` twice is
+    # fragile because `.manifest.json` is two suffixes; do the replacement
+    # directly on the name string.
+    name = manifest_path.name
+    suffix = ".manifest.json"
+    if not name.endswith(suffix):
+        return None
+    overlay_name = name[: -len(suffix)] + ".manifest.local.json"
+    overlay = manifest_path.parent / overlay_name
+    return overlay if overlay.is_file() else None
+
+
+def _load_overlay(overlay_path: Path) -> dict:
+    """Read + parse the overlay file.
+
+    Branches (matches anchor-spec bundled-malformed handling):
+      - unreadable (PermissionError) → ArgitError with chmod+r remediation
+      - empty bytes → ArgitError with "remove or add {}" remediation
+      - JSONDecodeError → ArgitError wrapping with file + line + column
+      - root not a dict → ArgitError naming the observed type
+      - valid dict (incl. `{}`) → returned as-is
+    """
+    try:
+        raw = overlay_path.read_text(encoding="utf-8")
+    except PermissionError as exc:
+        raise ArgitError(
+            f"overlay {overlay_path} is not readable: {exc}",
+            f"run `chmod +r {overlay_path}` to grant read permission",
+        ) from exc
+    except OSError as exc:
+        raise ArgitError(
+            f"overlay {overlay_path} cannot be read: {exc}",
+            "check filesystem state; the overlay file must be a regular, readable file",
+        ) from exc
+    if raw.strip() == "":
+        raise ArgitError(
+            f"overlay {overlay_path} is empty",
+            "remove the file or add `{}` to make it a valid empty overlay",
+        )
+    try:
+        body = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ArgitError(
+            f"overlay {overlay_path.name} is not valid JSON: {exc.msg} "
+            f"(line {exc.lineno}, column {exc.colno})",
+            "fix the JSON syntax; argit uses stdlib json — strict double-quoted keys, no trailing commas",
+        ) from exc
+    if not isinstance(body, dict):
+        raise ArgitError(
+            f"overlay {overlay_path.name} root must be a JSON object "
+            f"(got {type(body).__name__})",
+            "wrap the overlay contents in `{ ... }` — see MANIFEST.md §Overlay",
+        )
+    return body
+
+
+def _merge(
+    bundled: dict, overlay: dict, bundled_path: Path, overlay_path: Path,
+) -> dict:
+    """Merge overlay into bundled per the fixed rules table (Track C).
+
+    Merge runs BEFORE the existing validators so merged content flows
+    through the same parse path uniformly. Conflict detection operates on
+    raw-dict source tuples (per Track D strict-derivation, which forbids
+    explicit `pass`/`target` in the bundled manifest; overlay inherits the
+    rule via unknown-field rejection downstream).
+
+    Rules:
+      - Identity fields (schema_version, agent_type, agent_version,
+        manifest_revision, source_root, source_root_mode, blob_backend)
+        MUST NOT appear in overlay — raise naming offending field.
+      - exclude[] → union, bundled-order-first, append local, dedup.
+      - items[] → append bundled + overlay; literal-literal duplicate
+        (source, kind) → ArgitError naming both origin paths.
+      - sanitize[] → per-file union of rules[]; duplicate file across
+        bundled + overlay merges their rules (dup rule path → error);
+        file-only-in-overlay appended as new block.
+      - lifecycle.<sub> → overlay wins per sub-key (partial override OK).
+      - Cross-source ambiguity check on items[] + sanitize[] (AC-INT6).
+
+    Error messages always name BOTH bundled_path and overlay_path (F7
+    origin attribution).
+    """
+    for field_name in _IDENTITY_FIELDS | {"blob_backend"}:
+        if field_name in overlay:
+            raise ArgitError(
+                f"overlay {overlay_path.name} must not specify identity field "
+                f"'{field_name}' (bundled {bundled_path.name} owns it)",
+                f"remove '{field_name}' from {overlay_path}; identity fields come from the bundled manifest",
+            )
+
+    merged = dict(bundled)
+
+    # exclude[] — union with dedup, preserve bundled order, append local.
+    bundled_excl = list(bundled.get("exclude", []))
+    overlay_excl = list(overlay.get("exclude", []))
+    seen = set(bundled_excl)
+    merged_excl = list(bundled_excl)
+    for e in overlay_excl:
+        if e not in seen:
+            merged_excl.append(e)
+            seen.add(e)
+    merged["exclude"] = merged_excl
+
+    # items[] — append with literal duplicate check.
+    bundled_items = list(bundled.get("items", []))
+    overlay_items = list(overlay.get("items", []))
+    literal_index: dict[tuple[str, str], str] = {}
+    for it in bundled_items:
+        src, kind = it.get("source"), it.get("kind")
+        if isinstance(src, str) and isinstance(kind, str) and "*" not in src:
+            literal_index[(src, kind)] = bundled_path.name
+    for it in overlay_items:
+        src, kind = it.get("source"), it.get("kind")
+        if isinstance(src, str) and isinstance(kind, str) and "*" not in src:
+            key = (src, kind)
+            if key in literal_index:
+                raise ArgitError(
+                    f"overlay conflict: items[] entry (source='{src}', kind='{kind}') "
+                    f"appears in both {literal_index[key]} and {overlay_path.name}",
+                    f"remove the duplicate from {overlay_path} or the bundled manifest",
+                )
+            literal_index[key] = overlay_path.name
+    merged["items"] = bundled_items + overlay_items
+
+    # sanitize[] — per-file union of rules[].
+    bundled_san = list(bundled.get("sanitize", []))
+    overlay_san = list(overlay.get("sanitize", []))
+    by_file: dict[str, dict] = {sf["file"]: dict(sf) for sf in bundled_san if isinstance(sf, dict) and "file" in sf}
+    bundled_san_origin: dict[str, str] = {sf["file"]: bundled_path.name for sf in bundled_san if isinstance(sf, dict) and "file" in sf}
+    for osf in overlay_san:
+        if not isinstance(osf, dict) or "file" not in osf:
+            # Let the downstream parser produce the shape error.
+            by_file[len(by_file)] = osf  # type: ignore[assignment]
+            continue
+        file = osf["file"]
+        if file not in by_file:
+            by_file[file] = dict(osf)
+            bundled_san_origin[file] = overlay_path.name
+            continue
+        # Merge rules[] with duplicate-path check.
+        existing = by_file[file]
+        b_rules = list(existing.get("rules", []))
+        o_rules = list(osf.get("rules", []))
+        b_paths = {r["path"] for r in b_rules if isinstance(r, dict) and "path" in r}
+        for r in o_rules:
+            if not isinstance(r, dict) or "path" not in r:
+                b_rules.append(r)
+                continue
+            if r["path"] in b_paths:
+                raise ArgitError(
+                    f"overlay conflict: sanitize.file='{file}' has duplicate "
+                    f"rule path '{r['path']}' in both {bundled_san_origin[file]} "
+                    f"and {overlay_path.name}",
+                    f"remove the duplicate rule from {overlay_path}",
+                )
+            b_rules.append(r)
+            b_paths.add(r["path"])
+        existing["rules"] = b_rules
+    merged["sanitize"] = [v for k, v in by_file.items() if isinstance(k, str)] + \
+                        [v for k, v in by_file.items() if not isinstance(k, str)]
+
+    # lifecycle.<sub> — overlay wins per sub-key.
+    if "lifecycle" in overlay:
+        if not isinstance(overlay["lifecycle"], dict):
+            raise ArgitError(
+                f"overlay {overlay_path.name}: lifecycle must be an object",
+                "see MANIFEST.md §Lifecycle",
+            )
+        merged_life = dict(bundled.get("lifecycle", {}) or {})
+        for sub in ("detect_running", "stop", "start"):
+            if sub in overlay["lifecycle"]:
+                merged_life[sub] = overlay["lifecycle"][sub]
+        merged["lifecycle"] = merged_life
+
+    # AC-INT6: cross-source ambiguity check on merged items[]. Within-source
+    # overlaps are caught later by _check_target_ambiguity after parsing.
+    # Here we compare bundled items × overlay items and fail with origin
+    # attribution on any pairwise overlap (that isn't already a literal-
+    # literal duplicate, which was caught above).
+    bundled_sources = [
+        (it.get("source"), it.get("kind"))
+        for it in bundled_items
+        if isinstance(it.get("source"), str) and isinstance(it.get("kind"), str)
+    ]
+    for oit in overlay_items:
+        osrc, okind = oit.get("source"), oit.get("kind")
+        if not (isinstance(osrc, str) and isinstance(okind, str)):
+            continue
+        for bsrc, bkind in bundled_sources:
+            if bkind != okind:
+                continue
+            if bsrc == osrc and "*" not in bsrc:
+                continue  # literal-literal duplicate, already raised above
+            if path_conventions.targets_overlap(bsrc, osrc):
+                raise ArgitError(
+                    f"overlay conflict: items source '{osrc}' in {overlay_path.name} "
+                    f"overlaps with source '{bsrc}' in {bundled_path.name} "
+                    f"(same kind '{okind}', component-wise ambiguity)",
+                    f"disambiguate the sources; see MANIFEST.md §Path conventions + §Overlay",
+                )
+
+    return merged
+
+
 def find_manifest_file(repo_root: Path) -> Path:
     manifest_dir = repo_root / ".argit" / "manifest"
     if not manifest_dir.is_dir():
@@ -415,14 +633,33 @@ def load_manifest(repo_root: Path) -> Manifest:
             "rename the manifest file or correct the body field",
         )
 
-    excludes = body.get("exclude", [])
-    if not isinstance(excludes, list):
+    if not isinstance(body.get("exclude", []), list):
         raise ArgitError("manifest.exclude must be a list", "see MANIFEST.md §Exclude")
 
+    # Overlay discovery + merge — happens BEFORE per-item/per-sanitize
+    # validators so merged content flows through the same validation path
+    # uniformly. The merge is a raw-dict operation; validators run after.
+    overlay_path = _find_overlay(path)
+    if overlay_path is not None:
+        overlay_body = _load_overlay(overlay_path)
+        body = _merge(body, overlay_body, path, overlay_path)
+        # Re-check unknown top-level keys on merged body (overlay may have
+        # introduced e.g. a stray typo that the caller expects rejected).
+        _check_unknown_keys(body, _ALLOWED_TOP_LEVEL, "manifest (merged)")
+
+    excludes = body.get("exclude", [])
     agent_type = body["agent_type"]
     source_root_mode = _normalize_mode(
         body.get("source_root_mode", DEFAULT_SOURCE_ROOT_MODE), "source_root_mode",
     )
+    # Parse bundled items/sanitize separately from overlay items/sanitize
+    # so their origin tags are correct. We re-extract from the merged body
+    # by tagging each entry's position — but the simpler approach is to
+    # parse the entire merged body as "bundled" origin (since overlay's
+    # contribution is semantically part of the instance's definition), and
+    # rely on overlay_path on the Manifest dataclass to signal presence.
+    # The AC-INT7 within-overlay ambiguity case is handled by
+    # _check_target_ambiguity applied to the merged items list.
     sanitize = _parse_sanitize(body["sanitize"], agent_type, "bundled")
     items = _parse_items(body["items"], agent_type, "bundled")
     _check_target_ambiguity(items, "bundled")
@@ -439,4 +676,5 @@ def load_manifest(repo_root: Path) -> Manifest:
         exclude=[str(x) for x in excludes],
         lifecycle=_parse_lifecycle(body.get("lifecycle")),
         filename=path.name,
+        overlay_path=overlay_path,
     )
