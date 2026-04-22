@@ -135,9 +135,7 @@ def test_two_manifests(tmp_path):
 
 def test_secret_with_dir_source_rejected(tmp_path):
     body = json.loads(BUNDLED.read_text())
-    body["items"].append({
-        "kind": "secret", "source": "bad-dir/", "pass": "argit/x", "mode": "0600",
-    })
+    body["items"].append({"kind": "secret", "source": "bad-dir/"})
     repo = _init_repo(tmp_path, body, BUNDLED.name)
     with pytest.raises(ArgitError) as exc:
         load_manifest(repo)
@@ -146,7 +144,7 @@ def test_secret_with_dir_source_rejected(tmp_path):
 
 def test_wildcard_in_sanitize_path_rejected(tmp_path):
     body = json.loads(BUNDLED.read_text())
-    body["sanitize"][0]["rules"].append({"path": ".profiles.*.token", "pass": "argit/x"})
+    body["sanitize"][0]["rules"].append({"path": ".profiles.*.token"})
     repo = _init_repo(tmp_path, body, BUNDLED.name)
     with pytest.raises(ArgitError) as exc:
         load_manifest(repo)

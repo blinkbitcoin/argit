@@ -3,6 +3,11 @@
 Locates `.argit/manifest/*.manifest.json` (exactly one), parses it with stdlib
 `json`, and validates structure + filename↔body coherence. Returns a typed
 `Manifest` dataclass.
+
+Path derivation for `items[].pass` / `items[].target` / `sanitize[].target` /
+`sanitize.rules[].pass` is handled by `path_conventions.py` — this module
+populates the dataclass fields from the conventions rather than reading them
+from the manifest. Explicit `pass`/`target` in the manifest is rejected.
 """
 
 from __future__ import annotations
@@ -13,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import path_conventions
 from .errors import ArgitError
 
 VALID_KINDS = {"secret", "data", "sqlite", "blob"}
@@ -20,6 +26,17 @@ SUPPORTED_SCHEMA_VERSION = 1
 INSTALL_HINT = (
     "upgrade argit: curl -fsSL https://raw.githubusercontent.com/blinkbitcoin/argit/main/install.sh | bash"
 )
+DEFAULT_SOURCE_ROOT_MODE = "0700"
+DEFAULT_SANITIZE_MODE = "0600"
+
+_ALLOWED_TOP_LEVEL = {
+    "schema_version", "agent_type", "agent_version", "manifest_revision",
+    "source_root", "source_root_mode", "sanitize", "items", "exclude",
+    "lifecycle",
+}
+_ALLOWED_ITEM_KEYS = {"kind", "source", "mode"}
+_ALLOWED_SANITIZE_KEYS = {"file", "mode", "rules"}
+_ALLOWED_RULE_KEYS = {"path", "subtree"}
 
 
 @dataclass(frozen=True)
@@ -35,6 +52,7 @@ class SanitizeFile:
     target: str
     mode: str
     rules: list[SanitizeRule]
+    origin: str = "bundled"
 
 
 @dataclass(frozen=True)
@@ -44,11 +62,15 @@ class Item:
     mode: str
     target: str | None = None
     pass_path: str | None = None
-    blob_backend: str | None = None
+    origin: str = "bundled"
 
     @property
     def is_dir_source(self) -> bool:
         return self.source.endswith("/")
+
+    @property
+    def is_globbed(self) -> bool:
+        return "*" in self.source
 
 
 @dataclass(frozen=True)
@@ -75,12 +97,17 @@ class Manifest:
     manifest_revision: int
     source_root: str
     source_root_mode: str
-    blob_backend: str
     sanitize: list[SanitizeFile]
     items: list[Item]
     exclude: list[str]
     lifecycle: Lifecycle | None = None
     filename: str = ""
+    overlay_path: Path | None = None
+
+    @property
+    def blob_backend(self) -> str:
+        """Only git-lfs is supported under schema_version: 1."""
+        return path_conventions.BLOB_BACKEND
 
     def expanded_source_root(self) -> Path:
         return Path(self.source_root).expanduser()
@@ -122,6 +149,15 @@ def _require(d: dict, key: str, where: str) -> Any:
     return d[key]
 
 
+def _check_unknown_keys(d: dict, allowed: set[str], where: str) -> None:
+    for key in d:
+        if key not in allowed:
+            raise ArgitError(
+                f"unknown field '{key}' in {where}",
+                f"remove it; allowed fields in {where}: {sorted(allowed)} — see MANIFEST.md",
+            )
+
+
 def _parse_lifecycle_cmd(d: dict, where: str) -> LifecycleCommand:
     desc = _require(d, "description", where)
     cmd = _require(d, "command", where)
@@ -153,46 +189,56 @@ def _parse_lifecycle(d: dict | None) -> Lifecycle | None:
     )
 
 
-def _parse_sanitize_rules(rules: list, where: str) -> list[SanitizeRule]:
+def _parse_sanitize_rules(
+    rules: list, where: str, agent_type: str, file: str, source_label: str
+) -> list[SanitizeRule]:
     if not isinstance(rules, list) or len(rules) == 0:
         raise ArgitError(f"{where}: rules must be a non-empty list", "add at least one rule")
     out: list[SanitizeRule] = []
     for i, r in enumerate(rules):
         loc = f"{where}.rules[{i}]"
+        _check_unknown_keys(r, _ALLOWED_RULE_KEYS, loc)
         path = _require(r, "path", loc)
-        pass_p = _require(r, "pass", loc)
         if "*" in path:
             raise ArgitError(
                 f"{loc}.path '{path}' contains wildcard '*'",
                 "wildcards are unsupported; store the whole file as kind: secret instead",
             )
+        pass_p = path_conventions.derive_pass(agent_type, file, path)
         out.append(SanitizeRule(path=path, pass_path=pass_p, subtree=bool(r.get("subtree", False))))
     return out
 
 
-def _parse_sanitize(arr: Any) -> list[SanitizeFile]:
+def _parse_sanitize(arr: Any, agent_type: str, source_label: str) -> list[SanitizeFile]:
     if not isinstance(arr, list):
         raise ArgitError("manifest.sanitize must be a list", "see MANIFEST.md §Sanitize rules")
     out: list[SanitizeFile] = []
     for i, sf in enumerate(arr):
-        where = f"sanitize[{i}]"
+        where = f"sanitize[{i}] ({source_label})"
+        _check_unknown_keys(sf, _ALLOWED_SANITIZE_KEYS, where)
+        file = _require(sf, "file", where)
+        mode_raw = sf.get("mode", DEFAULT_SANITIZE_MODE)
         out.append(
             SanitizeFile(
-                file=_require(sf, "file", where),
-                target=_require(sf, "target", where),
-                mode=_normalize_mode(_require(sf, "mode", where), f"{where}.mode"),
-                rules=_parse_sanitize_rules(_require(sf, "rules", where), where),
+                file=file,
+                target=path_conventions.derive_sanitize_target(agent_type, file),
+                mode=_normalize_mode(mode_raw, f"{where}.mode"),
+                rules=_parse_sanitize_rules(
+                    _require(sf, "rules", where), where, agent_type, file, source_label,
+                ),
+                origin=source_label,
             )
         )
     return out
 
 
-def _parse_items(arr: Any) -> list[Item]:
+def _parse_items(arr: Any, agent_type: str, source_label: str) -> list[Item]:
     if not isinstance(arr, list) or len(arr) == 0:
         raise ArgitError("manifest.items must be a non-empty list", "add at least one item")
     out: list[Item] = []
     for i, it in enumerate(arr):
-        where = f"items[{i}]"
+        where = f"items[{i}] ({source_label})"
+        _check_unknown_keys(it, _ALLOWED_ITEM_KEYS, where)
         kind = _require(it, "kind", where)
         if kind not in VALID_KINDS:
             raise ArgitError(
@@ -200,17 +246,15 @@ def _parse_items(arr: Any) -> list[Item]:
                 f"use one of: {sorted(VALID_KINDS)}",
             )
         source = _require(it, "source", where)
-        mode = _normalize_mode(_require(it, "mode", where), f"{where}.mode")
-        target = it.get("target")
-        pass_p = it.get("pass")
+        path_conventions.validate_glob_source(source)
         is_dir = source.endswith("/")
+        is_globbed = "*" in source
+        # Kind-specific shape validation.
         if kind == "secret":
-            if pass_p is None:
-                raise ArgitError(f"{where}: kind=secret requires 'pass'", "add a pass-store path")
             if is_dir:
                 raise ArgitError(
-                    f"{where}: kind=secret with directory source ('{source}') is not supported in MVP",
-                    "list individual files or use kind=data + per-file kind=secret entries",
+                    f"{where}: kind=secret with directory source ('{source}') is not supported",
+                    "list individual files or use kind=data for directories",
                 )
         elif kind == "sqlite":
             if is_dir:
@@ -218,19 +262,20 @@ def _parse_items(arr: Any) -> list[Item]:
                     f"{where}: kind=sqlite source must be a file, not a directory",
                     "remove trailing '/' from source",
                 )
-            if target is None:
-                raise ArgitError(f"{where}: kind=sqlite requires 'target'", "add a repo-target path")
         elif kind == "blob":
-            if not is_dir:
+            if not is_dir and not is_globbed:
                 raise ArgitError(
                     f"{where}: kind=blob source must be a directory (trailing '/')",
                     "add trailing '/' to source",
                 )
-            if target is None:
-                raise ArgitError(f"{where}: kind=blob requires 'target'", "add a repo-target path")
-        elif kind == "data":
-            if target is None:
-                raise ArgitError(f"{where}: kind=data requires 'target'", "add a repo-target path")
+        mode_raw = it.get("mode", path_conventions.default_mode(kind))
+        mode = _normalize_mode(mode_raw, f"{where}.mode")
+        if kind == "secret":
+            target = None
+            pass_p = path_conventions.derive_item_pass(agent_type, source)
+        else:
+            target = path_conventions.derive_item_target(agent_type, kind, source)
+            pass_p = None
         out.append(
             Item(
                 kind=kind,
@@ -238,10 +283,28 @@ def _parse_items(arr: Any) -> list[Item]:
                 mode=mode,
                 target=target,
                 pass_path=pass_p,
-                blob_backend=it.get("blob_backend"),
+                origin=source_label,
             )
         )
     return out
+
+
+def _check_target_ambiguity(items: list[Item], source_label: str) -> None:
+    """AC-D19: pairwise targets_overlap over items in the same source."""
+    for i in range(len(items)):
+        for j in range(i + 1, len(items)):
+            a, b = items[i], items[j]
+            if a.kind != b.kind:
+                # Different kinds produce different target prefixes — no overlap.
+                # (secret has pass_path, not target; but kind must still match for
+                # a meaningful overlap claim.)
+                continue
+            if path_conventions.targets_overlap(a.source, b.source):
+                raise ArgitError(
+                    f"items[{i}] source '{a.source}' and items[{j}] source '{b.source}' "
+                    f"forward-derive to overlapping targets ({source_label})",
+                    "disambiguate the sources; see MANIFEST.md §Path conventions",
+                )
 
 
 def find_manifest_file(repo_root: Path) -> Path:
@@ -285,8 +348,10 @@ def load_manifest(repo_root: Path) -> Manifest:
             INSTALL_HINT,
         )
 
+    _check_unknown_keys(body, _ALLOWED_TOP_LEVEL, "manifest")
+
     for required in ("agent_type", "agent_version", "manifest_revision", "source_root",
-                     "source_root_mode", "blob_backend", "sanitize", "items", "exclude"):
+                     "sanitize", "items", "exclude"):
         if required not in body:
             raise ArgitError(
                 f"manifest missing required top-level field '{required}'",
@@ -309,26 +374,27 @@ def load_manifest(repo_root: Path) -> Manifest:
             "rename the manifest file or correct the body field",
         )
 
-    if body["blob_backend"] != "git-lfs":
-        raise ArgitError(
-            f"manifest.blob_backend '{body['blob_backend']}' not supported (MVP supports git-lfs only)",
-            "set blob_backend to \"git-lfs\"",
-        )
-
     excludes = body.get("exclude", [])
     if not isinstance(excludes, list):
         raise ArgitError("manifest.exclude must be a list", "see MANIFEST.md §Exclude")
 
+    agent_type = body["agent_type"]
+    source_root_mode = _normalize_mode(
+        body.get("source_root_mode", DEFAULT_SOURCE_ROOT_MODE), "source_root_mode",
+    )
+    sanitize = _parse_sanitize(body["sanitize"], agent_type, "bundled")
+    items = _parse_items(body["items"], agent_type, "bundled")
+    _check_target_ambiguity(items, "bundled")
+
     return Manifest(
         schema_version=schema,
-        agent_type=body["agent_type"],
+        agent_type=agent_type,
         agent_version=body["agent_version"],
         manifest_revision=int(body["manifest_revision"]),
         source_root=body["source_root"],
-        source_root_mode=_normalize_mode(body["source_root_mode"], "source_root_mode"),
-        blob_backend=body["blob_backend"],
-        sanitize=_parse_sanitize(body["sanitize"]),
-        items=_parse_items(body["items"]),
+        source_root_mode=source_root_mode,
+        sanitize=sanitize,
+        items=items,
         exclude=[str(x) for x in excludes],
         lifecycle=_parse_lifecycle(body.get("lifecycle")),
         filename=path.name,

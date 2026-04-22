@@ -1,7 +1,6 @@
 {
   "agent_type": "openclaw",
   "agent_version": "2026.4.14",
-  "blob_backend": "git-lfs",
   "exclude": [
     "*.bak*",
     "agents/main/sessions/",
@@ -18,38 +17,107 @@
     "workspace"
   ],
   "items": [
-    { "kind": "secret", "mode": "0600", "pass": "argit/openclaw/identity/device", "source": "identity/device.json" },
-    { "kind": "secret", "mode": "0600", "pass": "argit/openclaw/identity/device-auth", "source": "identity/device-auth.json" },
-    { "kind": "secret", "mode": "0600", "pass": "argit/openclaw/credentials/github-copilot", "source": "credentials/github-copilot.token.json" },
-    { "kind": "secret", "mode": "0600", "pass": "argit/openclaw/agents/auth-profiles", "source": "agents/main/agent/auth-profiles.json" },
-    { "kind": "secret", "mode": "0600", "pass": "argit/openclaw/devices/paired", "source": "devices/paired.json" },
-    { "kind": "data", "mode": "0644", "source": "update-check.json", "target": "openclaw/data/update-check.json" },
-    { "kind": "data", "mode": "0644", "source": "agents/main/agent/auth-state.json", "target": "openclaw/data/agents/main/agent/auth-state.json" },
-    { "kind": "data", "mode": "0644", "source": "agents/main/agent/models.json", "target": "openclaw/data/agents/main/agent/models.json" },
-    { "kind": "data", "mode": "0644", "source": "credentials/slack-pairing.json", "target": "openclaw/data/credentials/slack-pairing.json" },
-    { "kind": "data", "mode": "0644", "source": "credentials/slack-default-allowFrom.json", "target": "openclaw/data/credentials/slack-default-allowFrom.json" },
-    { "kind": "data", "mode": "0644", "source": "devices/pending.json", "target": "openclaw/data/devices/pending.json" },
-    { "kind": "data", "mode": "0644", "source": "canvas/index.html", "target": "openclaw/data/canvas/index.html" },
-    { "kind": "data", "mode": "0644", "source": "telegram/", "target": "openclaw/data/telegram/" },
-    { "kind": "sqlite", "mode": "0600", "source": "memory/main.sqlite", "target": "openclaw/state/memory-main.sqlite" },
-    { "kind": "sqlite", "mode": "0600", "source": "tasks/runs.sqlite", "target": "openclaw/state/tasks-runs.sqlite" },
-    { "kind": "sqlite", "mode": "0600", "source": "flows/registry.sqlite", "target": "openclaw/state/flows-registry.sqlite" },
-    { "blob_backend": "git-lfs", "kind": "blob", "mode": "0644", "source": "memory/lancedb/", "target": "openclaw/state/lancedb/" },
-    { "blob_backend": "git-lfs", "kind": "blob", "mode": "0644", "source": "media/inbound/", "target": "openclaw/media/inbound/" },
-    { "blob_backend": "git-lfs", "kind": "blob", "mode": "0644", "source": "media/browser/", "target": "openclaw/media/browser/" }
+    {
+      "kind": "secret",
+      "source": "identity/device.json"
+    },
+    {
+      "kind": "secret",
+      "source": "identity/device-auth.json"
+    },
+    {
+      "kind": "secret",
+      "source": "credentials/github-copilot.token.json"
+    },
+    {
+      "kind": "secret",
+      "source": "agents/main/agent/auth-profiles.json"
+    },
+    {
+      "kind": "secret",
+      "source": "devices/paired.json"
+    },
+    {
+      "kind": "data",
+      "source": "update-check.json"
+    },
+    {
+      "kind": "data",
+      "source": "agents/main/agent/auth-state.json"
+    },
+    {
+      "kind": "data",
+      "source": "agents/main/agent/models.json"
+    },
+    {
+      "kind": "data",
+      "source": "credentials/slack-pairing.json"
+    },
+    {
+      "kind": "data",
+      "source": "credentials/slack-default-allowFrom.json"
+    },
+    {
+      "kind": "data",
+      "source": "devices/pending.json"
+    },
+    {
+      "kind": "data",
+      "source": "canvas/index.html"
+    },
+    {
+      "kind": "data",
+      "source": "telegram/"
+    },
+    {
+      "kind": "sqlite",
+      "source": "memory/main.sqlite"
+    },
+    {
+      "kind": "sqlite",
+      "source": "tasks/runs.sqlite"
+    },
+    {
+      "kind": "sqlite",
+      "source": "flows/registry.sqlite"
+    },
+    {
+      "kind": "blob",
+      "source": "memory/lancedb/"
+    },
+    {
+      "kind": "blob",
+      "source": "media/inbound/"
+    },
+    {
+      "kind": "blob",
+      "source": "media/browser/"
+    }
   ],
   "lifecycle": {
     "detect_running": {
-      "command": ["sh", "-c", "curl -sSf --max-time 2 http://127.0.0.1:10001/health > /dev/null"],
+      "command": [
+        "sh",
+        "-c",
+        "curl -sSf --max-time 2 http://127.0.0.1:10001/health > /dev/null"
+      ],
       "description": "OpenClaw gateway HTTP health endpoint responds on default port 10001",
       "running_exit_code": 0
     },
     "start": {
-      "command": ["sh", "-c", "systemctl --user start openclaw-gateway 2>/dev/null || launchctl load ~/Library/LaunchAgents/openclaw.plist 2>/dev/null || echo 'Could not auto-start OpenClaw. Start manually, then run: argit doctor'"],
+      "command": [
+        "sh",
+        "-c",
+        "systemctl --user start openclaw-gateway 2>/dev/null || launchctl load ~/Library/LaunchAgents/openclaw.plist 2>/dev/null || echo 'Could not auto-start OpenClaw. Start manually, then run: argit doctor'"
+      ],
       "description": "Start OpenClaw (same fallback chain as stop). Authors must keep this idempotent against an already-running agent (systemctl is; pkill+exec is not)."
     },
     "stop": {
-      "command": ["sh", "-c", "systemctl --user stop openclaw-gateway 2>/dev/null || launchctl unload ~/Library/LaunchAgents/openclaw.plist 2>/dev/null || pkill -TERM -f 'openclaw.*gateway'"],
+      "command": [
+        "sh",
+        "-c",
+        "systemctl --user stop openclaw-gateway 2>/dev/null || launchctl unload ~/Library/LaunchAgents/openclaw.plist 2>/dev/null || pkill -TERM -f 'openclaw.*gateway'"
+      ],
       "description": "Stop OpenClaw (systemd user unit, launchd agent, or SIGTERM fallback)"
     }
   },
@@ -57,26 +125,34 @@
   "sanitize": [
     {
       "file": "openclaw.json",
-      "mode": "0600",
       "rules": [
-        { "path": ".gateway.auth.token", "pass": "argit/openclaw/gateway/auth-token" },
-        { "path": ".channels.telegram.botToken", "pass": "argit/openclaw/channels/telegram-bot-token" },
-        { "path": ".channels.slack.botToken", "pass": "argit/openclaw/channels/slack-bot-token" },
-        { "path": ".channels.slack.appToken", "pass": "argit/openclaw/channels/slack-app-token" },
-        { "path": ".env", "pass": "argit/openclaw/env", "subtree": true }
-      ],
-      "target": "openclaw/config/openclaw.json"
+        {
+          "path": ".gateway.auth.token"
+        },
+        {
+          "path": ".channels.telegram.botToken"
+        },
+        {
+          "path": ".channels.slack.botToken"
+        },
+        {
+          "path": ".channels.slack.appToken"
+        },
+        {
+          "path": ".env",
+          "subtree": true
+        }
+      ]
     },
     {
       "file": "exec-approvals.json",
-      "mode": "0600",
       "rules": [
-        { "path": ".socket.token", "pass": "argit/openclaw/exec-approvals/socket-token" }
-      ],
-      "target": "openclaw/config/exec-approvals.json"
+        {
+          "path": ".socket.token"
+        }
+      ]
     }
   ],
   "schema_version": 1,
-  "source_root": "~/.openclaw",
-  "source_root_mode": "0700"
+  "source_root": "~/.openclaw"
 }
