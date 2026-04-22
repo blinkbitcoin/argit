@@ -14,10 +14,8 @@ import pytest
 
 from argit.errors import ArgitError
 from argit.manifest import (
-    Manifest,
     _find_overlay,
     _load_overlay,
-    _merge,
     load_manifest,
 )
 from argit.setup import _bundled_manifest_path
@@ -443,3 +441,81 @@ def test_overlay_sanitize_tagged_overlay(tmp_path):
     assert overlay_sf[0].origin == "overlay"
     bundled_sf = [sf for sf in m.sanitize if sf.file != "operator-plugin.json"]
     assert all(sf.origin == "bundled" for sf in bundled_sf)
+
+
+# ---------- hardening — Copilot review findings ----------
+
+def test_merge_rejects_non_list_overlay_exclude(tmp_path):
+    """Overlay `exclude: "foo"` must not be silently coerced to
+    ['f','o','o'] — validate type at merge."""
+    repo = _stage(tmp_path, _fresh_bundled(), {"exclude": "operator-extra/"})
+    with pytest.raises(ArgitError) as exc:
+        load_manifest(repo)
+    msg = str(exc.value)
+    assert "exclude" in msg
+    assert "must be a list" in msg
+    assert ".manifest.local.json" in msg
+
+
+def test_merge_rejects_non_list_overlay_items(tmp_path):
+    repo = _stage(tmp_path, _fresh_bundled(), {"items": "not-a-list"})
+    with pytest.raises(ArgitError) as exc:
+        load_manifest(repo)
+    assert "items" in str(exc.value)
+    assert "must be a list" in str(exc.value)
+
+
+def test_merge_rejects_non_list_overlay_sanitize(tmp_path):
+    repo = _stage(tmp_path, _fresh_bundled(), {"sanitize": "not-a-list"})
+    with pytest.raises(ArgitError) as exc:
+        load_manifest(repo)
+    assert "sanitize" in str(exc.value)
+    assert "must be a list" in str(exc.value)
+
+
+def test_merge_rejects_non_dict_overlay_item_cleanly(tmp_path):
+    """A non-dict item in overlay must raise ArgitError (not
+    AttributeError from .get on a string) when AC-INT6 loop runs."""
+    overlay = {"items": ["not-a-dict"]}
+    repo = _stage(tmp_path, _fresh_bundled(), overlay)
+    with pytest.raises(ArgitError) as exc:
+        load_manifest(repo)
+    assert "expected a JSON object" in str(exc.value)
+
+
+def test_merge_rejects_within_overlay_sanitize_file_dup(tmp_path):
+    """Two overlay sanitize entries with the same `file` must raise
+    with the overlay path named — not be silently overwritten."""
+    overlay = {
+        "sanitize": [
+            {"file": "operator-plugin.json", "rules": [{"path": ".a"}]},
+            {"file": "operator-plugin.json", "rules": [{"path": ".b"}]},
+        ],
+    }
+    repo = _stage(tmp_path, _fresh_bundled(), overlay)
+    with pytest.raises(ArgitError) as exc:
+        load_manifest(repo)
+    msg = str(exc.value)
+    assert "operator-plugin.json" in msg
+    assert ".manifest.local.json" in msg
+
+
+def test_origin_sentinel_injection_in_bundled_without_overlay_rejected(tmp_path):
+    """When no overlay is present `_merge` doesn't run, so a user-injected
+    `_origin` in an operator-modified bundled manifest must still be
+    rejected as an unknown field — `_consume_origin` leaves non-allowlist
+    sentinel values in place for `_check_unknown_keys`.
+
+    (With an overlay present, `_merge`'s `_tag` step overwrites any user
+    value, so the injection path is only reachable without an overlay.)"""
+    body = _fresh_bundled()
+    body["items"].append({
+        "kind": "data",
+        "source": "operator-plugin/state.json",
+        "_origin": "evil",
+    })
+    repo = _stage(tmp_path, body, None)
+    with pytest.raises(ArgitError) as exc:
+        load_manifest(repo)
+    assert "_origin" in str(exc.value)
+    assert "unknown field" in str(exc.value)

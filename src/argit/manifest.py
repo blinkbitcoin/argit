@@ -215,6 +215,19 @@ def _parse_sanitize_rules(
 
 
 _ORIGIN_SENTINEL = "_origin"
+_VALID_ORIGINS = {"bundled", "overlay"}
+
+
+def _consume_origin(entry: dict, source_label: str) -> str:
+    """Return the per-entry origin for `entry`, popping the sentinel when
+    it was set internally by `_merge`. A user-authored `_origin` key with a
+    value outside the internal allowlist is left in place so
+    `_check_unknown_keys` rejects it downstream (defence against operator
+    injection of `_origin: "bundled"` in an overlay to misattribute errors).
+    """
+    if _ORIGIN_SENTINEL in entry and entry[_ORIGIN_SENTINEL] in _VALID_ORIGINS:
+        return entry.pop(_ORIGIN_SENTINEL)
+    return source_label
 
 
 def _parse_sanitize(arr: Any, agent_type: str, source_label: str) -> list[SanitizeFile]:
@@ -232,9 +245,7 @@ def _parse_sanitize(arr: Any, agent_type: str, source_label: str) -> list[Saniti
                 "each sanitize entry must be an object like "
                 "{\"file\": \"...\", \"rules\": [...]}",
             )
-        per_entry_origin = source_label
-        if _ORIGIN_SENTINEL in sf:
-            per_entry_origin = sf.pop(_ORIGIN_SENTINEL)
+        per_entry_origin = _consume_origin(sf, source_label)
         where = f"sanitize[{i}] ({per_entry_origin})"
         _check_unknown_keys(sf, _ALLOWED_SANITIZE_KEYS, where)
         file = _require(sf, "file", where)
@@ -278,9 +289,7 @@ def _parse_items(arr: Any, agent_type: str, source_label: str) -> list[Item]:
                 f"items[{i}] ({source_label}): expected a JSON object (got {type(it).__name__})",
                 "each item must be an object like {\"kind\": \"data\", \"source\": \"foo.json\"}",
             )
-        per_entry_origin = source_label
-        if _ORIGIN_SENTINEL in it:
-            per_entry_origin = it.pop(_ORIGIN_SENTINEL)
+        per_entry_origin = _consume_origin(it, source_label)
         where = f"items[{i}] ({per_entry_origin})"
         _check_unknown_keys(it, _ALLOWED_ITEM_KEYS, where)
         kind = _require(it, "kind", where)
@@ -479,9 +488,22 @@ def _merge(
 
     merged = dict(bundled)
 
+    # Reject non-list bundled/overlay array fields up-front. Without this,
+    # `list(<str>)` silently expands to a list of characters and slips past
+    # downstream `isinstance(..., list)` validators.
+    def _require_list(source_label: str, source_path: Path, body: dict, key: str) -> list:
+        val = body.get(key, [])
+        if not isinstance(val, list):
+            raise ArgitError(
+                f"{source_label} {source_path.name}: manifest.{key} must be a list "
+                f"(got {type(val).__name__})",
+                f"set {key} in {source_path} to a JSON array",
+            )
+        return val
+
     # exclude[] — union with dedup, preserve bundled order, append local.
-    bundled_excl = list(bundled.get("exclude", []))
-    overlay_excl = list(overlay.get("exclude", []))
+    bundled_excl = _require_list("bundled", bundled_path, bundled, "exclude")
+    overlay_excl = _require_list("overlay", overlay_path, overlay, "exclude")
     seen = set(bundled_excl)
     merged_excl = list(bundled_excl)
     for e in overlay_excl:
@@ -497,8 +519,8 @@ def _merge(
             return {**it, _ORIGIN_SENTINEL: origin}
         return it
 
-    bundled_items = [_tag(it, "bundled") for it in bundled.get("items", [])]
-    overlay_items = [_tag(it, "overlay") for it in overlay.get("items", [])]
+    bundled_items = [_tag(it, "bundled") for it in _require_list("bundled", bundled_path, bundled, "items")]
+    overlay_items = [_tag(it, "overlay") for it in _require_list("overlay", overlay_path, overlay, "items")]
 
     # Literal-duplicate check — (source, kind) pairs must be unique across
     # bundled + overlay. Three error shapes for operator clarity:
@@ -540,8 +562,8 @@ def _merge(
     # sanitize[] — per-file union of rules[]. Tag with _ORIGIN_SENTINEL;
     # malformed entries (non-dict or missing "file") collect in a sidecar
     # list and are appended at the end for downstream validators to catch.
-    bundled_san = list(bundled.get("sanitize", []))
-    overlay_san = list(overlay.get("sanitize", []))
+    bundled_san = _require_list("bundled", bundled_path, bundled, "sanitize")
+    overlay_san = _require_list("overlay", overlay_path, overlay, "sanitize")
     by_file: dict[str, dict] = {}
     san_origin: dict[str, str] = {}
     malformed_san: list[Any] = []
@@ -549,13 +571,27 @@ def _merge(
         if not isinstance(sf, dict) or "file" not in sf:
             malformed_san.append(_tag(sf, "bundled"))
             continue
+        if sf["file"] in by_file:
+            raise ArgitError(
+                f"bundled manifest has two sanitize[] entries with "
+                f"file='{sf['file']}' within {bundled_path.name}",
+                "each sanitize file must be unique",
+            )
         by_file[sf["file"]] = {**sf, _ORIGIN_SENTINEL: "bundled"}
         san_origin[sf["file"]] = bundled_path.name
+    overlay_seen_files: set[str] = set()
     for osf in overlay_san:
         if not isinstance(osf, dict) or "file" not in osf:
             malformed_san.append(_tag(osf, "overlay"))
             continue
         file = osf["file"]
+        if file in overlay_seen_files:
+            raise ArgitError(
+                f"overlay conflict: sanitize[] has two entries with "
+                f"file='{file}' within {overlay_path.name}",
+                f"remove the duplicate from {overlay_path}",
+            )
+        overlay_seen_files.add(file)
         if file not in by_file:
             by_file[file] = {**osf, _ORIGIN_SENTINEL: "overlay"}
             san_origin[file] = overlay_path.name
@@ -614,9 +650,13 @@ def _merge(
     bundled_sources = [
         (it.get("source"), it.get("kind"))
         for it in bundled_items
-        if isinstance(it.get("source"), str) and isinstance(it.get("kind"), str)
+        if isinstance(it, dict)
+        and isinstance(it.get("source"), str)
+        and isinstance(it.get("kind"), str)
     ]
     for oit in overlay_items:
+        if not isinstance(oit, dict):
+            continue
         osrc, okind = oit.get("source"), oit.get("kind")
         if not (isinstance(osrc, str) and isinstance(okind, str)):
             continue
@@ -722,14 +762,13 @@ def load_manifest(repo_root: Path) -> Manifest:
     source_root_mode = _normalize_mode(
         body.get("source_root_mode", DEFAULT_SOURCE_ROOT_MODE), "source_root_mode",
     )
-    # Parse bundled items/sanitize separately from overlay items/sanitize
-    # so their origin tags are correct. We re-extract from the merged body
-    # by tagging each entry's position — but the simpler approach is to
-    # parse the entire merged body as "bundled" origin (since overlay's
-    # contribution is semantically part of the instance's definition), and
-    # rely on overlay_path on the Manifest dataclass to signal presence.
-    # The AC-INT7 within-overlay ambiguity case is handled by
-    # _check_target_ambiguity applied to the merged items list.
+    # Origin attribution is done per-entry by `_merge`, which tags each
+    # item/sanitize block with _ORIGIN_SENTINEL before parse. Here we pass
+    # "bundled" as the fallback origin — it applies only to entries the
+    # merge step did not tag (i.e. bundled-only bodies, where no overlay
+    # exists). `_parse_items`/`_parse_sanitize` consume the sentinel via
+    # `_consume_origin`. AC-INT7 within-overlay ambiguity is caught by
+    # `_check_target_ambiguity` on the merged items list.
     sanitize = _parse_sanitize(body["sanitize"], agent_type, "bundled")
     items = _parse_items(body["items"], agent_type, "bundled")
     _check_target_ambiguity(items, "bundled")
