@@ -239,9 +239,9 @@ def run_restore(repo_root: Path, *, target: str | None, overwrite: bool, merge: 
             # Track B: expand globbed items once. Non-secret globs enumerate
             # via repo-filesystem (AC-B7); secret globs enumerate from the
             # pass store. Runtime duplicate detection is internal to the
-            # helper (AC-INT5). Zero-match globs result in no concrete items
-            # for that entry — silently skipped at restore (the warning
-            # surfaced at backup time).
+            # helper (AC-INT5). Zero-match globs produce no concrete items
+            # for that entry and emit a restore-time warning via `_warn` —
+            # expected when the repo is legitimately missing matches.
             concrete_items = expand_items_for_restore(
                 manifest, repo_root, pass_entries=pass_wrap.ls(), warn=_warn,
             )

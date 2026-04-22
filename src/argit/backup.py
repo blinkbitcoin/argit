@@ -16,7 +16,6 @@ Phases (per tech-spec-01-mvp.md §Task 11.1):
 from __future__ import annotations
 
 import datetime as dt
-import fnmatch
 import json
 import re
 import shutil

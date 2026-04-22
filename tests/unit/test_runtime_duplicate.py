@@ -117,6 +117,41 @@ def test_int5_restore_side_collision_via_repo_filesystem(tmp_path):
     assert "runtime duplicate at restore" in str(exc.value)
 
 
+def test_runtime_dup_error_names_both_manifest_files(tmp_path):
+    """AC-INT5 docstring promises both origin manifest files are named in
+    the error — verify the error includes the bundled filename AND the
+    overlay file's name, not just the origin labels."""
+    (tmp_path / "agents" / "main").mkdir(parents=True)
+    (tmp_path / "agents" / "main" / "x.json").write_text("{}")
+
+    overlay_path = tmp_path / ".argit" / "manifest" / "openclaw-2026.4.14-6.manifest.local.json"
+    overlay_path.parent.mkdir(parents=True)
+    overlay_path.write_text("{}")
+
+    manifest = Manifest(
+        schema_version=1,
+        agent_type="openclaw",
+        agent_version="2026.4.14",
+        manifest_revision=6,
+        source_root="/tmp",
+        source_root_mode="0700",
+        sanitize=[],
+        items=[
+            _item("data", "agents/*/x.json", origin="bundled"),
+            _item("data", "agents/main/x.json", origin="overlay"),
+        ],
+        exclude=[],
+        lifecycle=None,
+        filename="openclaw-2026.4.14-6.manifest.json",
+        overlay_path=overlay_path,
+    )
+    with pytest.raises(ArgitError) as exc:
+        expand_items_for_backup(manifest, tmp_path)
+    msg = str(exc.value)
+    assert "openclaw-2026.4.14-6.manifest.json" in msg
+    assert "openclaw-2026.4.14-6.manifest.local.json" in msg
+
+
 def test_restore_non_globbed_items_pass_through(tmp_path):
     """Non-globbed items don't need enumeration — they pass through as-is
     (repo-filesystem presence check is the downstream restore phase's job)."""

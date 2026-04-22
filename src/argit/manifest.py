@@ -780,6 +780,15 @@ def load_manifest(repo_root: Path) -> Manifest:
 
 # ---------- Track B — glob expansion ----------
 
+def _origin_file(manifest: Manifest, origin: str) -> str:
+    """Map an item/rule origin label to its source manifest filename, for
+    runtime-duplicate error messages. Overlay path is optional; bundled
+    filename is always present."""
+    if origin == "overlay" and manifest.overlay_path is not None:
+        return manifest.overlay_path.name
+    return manifest.filename
+
+
 def expand_globbed_item(
     item: Item, root: Path, agent_type: str, exclude_patterns: list[str] | None = None,
 ) -> list[Item]:
@@ -928,7 +937,9 @@ def expand_items_for_backup(
                 prev = by_source[key]
                 raise ArgitError(
                     f"runtime duplicate: concrete (source='{exp.source}', kind='{exp.kind}') "
-                    f"expanded from two items — one ({prev.origin}), one ({exp.origin})",
+                    f"expanded from two items — "
+                    f"one ({prev.origin} in {_origin_file(manifest, prev.origin)}), "
+                    f"one ({exp.origin} in {_origin_file(manifest, exp.origin)})",
                     "disambiguate by removing the conflicting overlay or bundled item; "
                     "see MANIFEST.md §Globs in items",
                 )
@@ -1027,8 +1038,9 @@ def expand_items_for_restore(
                 prev = by_key[key]
                 raise ArgitError(
                     f"runtime duplicate at restore: concrete (source='{exp.source}', "
-                    f"kind='{exp.kind}') from two items — one ({prev.origin}), "
-                    f"one ({exp.origin})",
+                    f"kind='{exp.kind}') from two items — "
+                    f"one ({prev.origin} in {_origin_file(manifest, prev.origin)}), "
+                    f"one ({exp.origin} in {_origin_file(manifest, exp.origin)})",
                     "inspect the repo / pass-store for stale entries or manifest conflicts",
                 )
             by_key[key] = exp
