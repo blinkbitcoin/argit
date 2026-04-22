@@ -301,18 +301,6 @@ def _parse_items(arr: Any, agent_type: str, source_label: str) -> list[Item]:
             )
         source = _require(it, "source", where)
         path_conventions.validate_glob_source(source)
-        # Track D accepts the glob GRAMMAR (path_conventions.validate_glob_source)
-        # but does NOT ship the expansion pipeline — that lives in Track B.
-        # Reject any `*` in `source` here so operators can't author a glob
-        # item that parses under Track D and then silently misbehaves at
-        # backup/restore (which treat `source` as a literal path). Track B
-        # relaxes this check when the expansion pipeline lands.
-        if "*" in source:
-            raise ArgitError(
-                f"{where}: globs in items[].source not supported in this release "
-                f"(source='{source}')",
-                "use a literal source; glob expansion ships in a subsequent release",
-            )
         is_dir = source.endswith("/")
         is_globbed = "*" in source
         # Kind-specific shape validation.
