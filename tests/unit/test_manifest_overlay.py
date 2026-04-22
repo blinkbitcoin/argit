@@ -391,6 +391,10 @@ def test_int7_within_overlay_literal_dup_names_overlay(tmp_path):
     assert "bundled" not in msg.lower() or "within" in msg
 
 
+@pytest.mark.skip(
+    reason="Track D rejects globs in items[].source at parse; glob-vs-literal "
+    "within-overlay overlap becomes testable once Track B enables glob sources"
+)
 def test_int7_within_overlay_glob_vs_literal_overlap(tmp_path):
     overlay = {
         "items": [
