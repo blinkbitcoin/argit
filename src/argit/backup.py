@@ -16,7 +16,6 @@ Phases (per tech-spec-01-mvp.md §Task 11.1):
 from __future__ import annotations
 
 import datetime as dt
-import fnmatch
 import json
 import re
 import shutil
@@ -30,7 +29,7 @@ from typing import Iterable
 import click
 
 from .errors import ArgitError
-from .manifest import Item, Manifest, SanitizeFile, load_manifest
+from .manifest import Item, Manifest, SanitizeFile, expand_items_for_backup, load_manifest
 from .passwrap import PassWrap
 from .sanitize import sanitize as run_sanitize
 from .shared import (
@@ -38,6 +37,7 @@ from .shared import (
     acquire_lock,
     check_no_partial_state,
     in_progress_marker,
+    matches_exclude,
     run_preflight,
 )
 
@@ -84,30 +84,46 @@ def _is_under(rel: Path, prefix: str) -> bool:
     return str(rel) == prefix
 
 
-def _matches_exclude(rel: Path, patterns: list[str]) -> bool:
-    """Match `rel` against a manifest exclude pattern.
+def _glob_pattern_matches(rel_str: str, pattern: str) -> bool:
+    """Component-wise match: `*` is a single-component wildcard (regex [^/]+).
 
-    Pattern semantics (intentionally looser than shell glob):
-    - Trailing `/` → directory prefix; matches the directory and everything under it.
-    - `*` matches across path separators (so `*.sqlite-wal` matches
-      `tasks/runs.sqlite-wal`). This deviates from POSIX `fnmatch` but matches
-      operator intent for manifest-author-friendly patterns.
+    Whole-source `*` patterns must NOT cross `/`. Pattern components must
+    equal the path components one-for-one (or be `*`). Trailing-slash dir
+    patterns match the directory prefix — `agents/*/` covers `agents/main/`
+    and everything under it.
     """
-    s = str(rel)
-    for pat in patterns:
-        if pat.endswith("/") and (s + "/").startswith(pat):
-            return True
-        if fnmatch.fnmatch(s, pat):
-            return True
-        if pat.endswith("/") and s.startswith(pat):
-            return True
-    return False
+    dir_pat = pattern.endswith("/")
+    pat_clean = pattern.rstrip("/")
+    pat_parts = pat_clean.split("/")
+    rel_parts = rel_str.split("/")
+    if dir_pat:
+        if len(rel_parts) < len(pat_parts):
+            return False
+        for pp, rp in zip(pat_parts, rel_parts):
+            if pp == "*":
+                continue
+            if pp != rp:
+                return False
+        return True
+    if len(rel_parts) != len(pat_parts):
+        return False
+    for pp, rp in zip(pat_parts, rel_parts):
+        if pp == "*":
+            continue
+        if pp != rp:
+            return False
+    return True
 
 
 def _covered_by_items(rel: Path, items: list[Item]) -> bool:
+    rel_str = str(rel)
     for it in items:
-        if _is_under(rel, it.source):
-            return True
+        if it.is_globbed:
+            if _glob_pattern_matches(rel_str, it.source):
+                return True
+        else:
+            if _is_under(rel, it.source):
+                return True
     return False
 
 
@@ -199,7 +215,7 @@ def run_backup(repo_root: Path, *, commit: bool, push: bool, strict: bool, dry_r
         # partial state, so we stay outside the in-progress marker.
         unspecified: list[str] = []
         for rel in _walk_relative(source_root):
-            if _matches_exclude(rel, manifest.exclude):
+            if matches_exclude(rel, manifest.exclude):
                 continue
             if _covered_by_items(rel, manifest.items):
                 continue
@@ -214,6 +230,11 @@ def run_backup(repo_root: Path, *, commit: bool, push: bool, strict: bool, dry_r
                 )
             for p in unspecified:
                 _warn(f"not backed up: {p} — not in manifest")
+
+        # Track B: expand globbed items once at the boundary so phases 4-7
+        # iterate concrete items only. Zero-match globs warn per-item (AC-B4);
+        # runtime duplicates across the expanded set raise (AC-INT5).
+        concrete_items = expand_items_for_backup(manifest, source_root, warn=_warn)
 
         # The marker enters HERE — right before the first mutating phase.
         # Preflight, unspecified-files walk, and version-check are all read-
@@ -251,7 +272,7 @@ def run_backup(repo_root: Path, *, commit: bool, push: bool, strict: bool, dry_r
                 _emit(False, f"sanitize: {sf.file} ({len(extracted)}/{len(sf.rules)} rules → pass)")
 
             # 4. Whole-file secrets
-            for it in [i for i in manifest.items if i.kind == "secret"]:
+            for it in [i for i in concrete_items if i.kind == "secret"]:
                 src = source_root / it.source
                 if not src.is_file():
                     _warn(f"secret source missing: {it.source} (skipping)")
@@ -263,7 +284,7 @@ def run_backup(repo_root: Path, *, commit: bool, push: bool, strict: bool, dry_r
                 _emit(False, f"secret: {it.source} → pass")
 
             # 5. Data copy
-            for it in [i for i in manifest.items if i.kind == "data"]:
+            for it in [i for i in concrete_items if i.kind == "data"]:
                 src = source_root / it.source
                 tgt = repo_root / it.target
                 if it.is_dir_source:
@@ -288,7 +309,7 @@ def run_backup(repo_root: Path, *, commit: bool, push: bool, strict: bool, dry_r
                 _emit(False, f"data: {it.source} → {it.target}")
 
             # 6. SQLite snapshots (.backup)
-            for it in [i for i in manifest.items if i.kind == "sqlite"]:
+            for it in [i for i in concrete_items if i.kind == "sqlite"]:
                 src = source_root / it.source
                 if not src.is_file():
                     _warn(f"sqlite source missing: {it.source} (skipping)")
@@ -317,7 +338,7 @@ def run_backup(repo_root: Path, *, commit: bool, push: bool, strict: bool, dry_r
                 _emit(False, f"sqlite: {it.source} → {it.target}")
 
             # 7. Blob sync
-            for it in [i for i in manifest.items if i.kind == "blob"]:
+            for it in [i for i in concrete_items if i.kind == "blob"]:
                 src = source_root / it.source
                 tgt = repo_root / it.target
                 if not src.is_dir():
@@ -352,7 +373,7 @@ def run_backup(repo_root: Path, *, commit: bool, push: bool, strict: bool, dry_r
 
             # 8. --commit
             if commit:
-                _git_commit(repo_root, manifest, iso, dry_run)
+                _git_commit(repo_root, manifest, concrete_items, iso, dry_run)
 
             # 9. --push
             if push:
@@ -385,10 +406,16 @@ def _current_git_sha(repo_root: Path) -> str | None:
     return cp.stdout.strip()
 
 
-def _git_commit(repo_root: Path, manifest: Manifest, iso: str, dry: bool) -> None:
-    """Stage manifest's managed paths + secrets/ + .argit/last-backup.json; commit."""
+def _git_commit(
+    repo_root: Path, manifest: Manifest, concrete_items: list[Item], iso: str, dry: bool,
+) -> None:
+    """Stage manifest's managed paths + secrets/ + .argit/last-backup.json; commit.
+
+    `concrete_items` — the post-glob-expansion item list, so `it.target`
+    is always a concrete path (never contains `*`).
+    """
     paths_to_add: list[str] = []
-    for it in manifest.items:
+    for it in concrete_items:
         if it.kind == "secret":
             continue  # secret is in secrets/, added below
         if it.target:

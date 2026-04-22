@@ -249,43 +249,6 @@ def test_non_object_sanitize_rule_rejected(tmp_path, bad_entry):
     assert "expected a JSON object" in str(exc.value)
 
 
-# ---------- Copilot review: Track D rejects globbed sources ----------
-# Track D validates the glob grammar via path_conventions but does not ship
-# the expansion pipeline — accepting globs at parse would let an operator
-# author an item that silently misbehaves at backup/restore. Track B's PR
-# removes this rejection.
-
-@pytest.mark.parametrize(
-    "globbed_source,kind", [
-        ("agents/*/agent/auth-profiles.json", "secret"),
-        ("agents/*/agent/auth-state.json", "data"),
-        ("agents/*/", "blob"),
-        ("plugins/*/x.sqlite", "sqlite"),
-    ],
-)
-def test_globbed_source_rejected_in_track_d(tmp_path, globbed_source, kind):
-    body = _fresh_body()
-    body["items"].append({"kind": kind, "source": globbed_source})
-    with pytest.raises(ArgitError) as exc:
-        load_manifest(_stage(tmp_path, body))
-    msg = str(exc.value)
-    assert "globs in items[].source not supported" in msg
-    assert globbed_source in msg
-
-
-def test_globbed_source_passes_grammar_check_but_rejected_at_item_level(tmp_path):
-    """Defence in depth: path_conventions.validate_glob_source would accept
-    `agents/*/x.json` (valid grammar) but _parse_items rejects it with a
-    distinct message pointing at release scope, not grammar."""
-    body = _fresh_body()
-    body["items"].append({"kind": "data", "source": "agents/*/x.json"})
-    with pytest.raises(ArgitError) as exc:
-        load_manifest(_stage(tmp_path, body))
-    msg = str(exc.value)
-    # The message distinguishes "grammar invalid" from "release scope":
-    assert "not supported in this release" in msg or "globs in items" in msg
-
-
 # ---------- Copilot review: directory-prefix ambiguity check ----------
 
 def test_ambiguity_dir_source_vs_file_under_it_rejected(tmp_path):

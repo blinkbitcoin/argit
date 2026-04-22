@@ -20,6 +20,7 @@ from typing import Any
 
 from . import path_conventions
 from .errors import ArgitError
+from .shared import matches_exclude
 
 VALID_KINDS = {"secret", "data", "sqlite", "blob"}
 SUPPORTED_SCHEMA_VERSION = 1
@@ -300,18 +301,6 @@ def _parse_items(arr: Any, agent_type: str, source_label: str) -> list[Item]:
             )
         source = _require(it, "source", where)
         path_conventions.validate_glob_source(source)
-        # Track D accepts the glob GRAMMAR (path_conventions.validate_glob_source)
-        # but does NOT ship the expansion pipeline — that lives in Track B.
-        # Reject any `*` in `source` here so operators can't author a glob
-        # item that parses under Track D and then silently misbehaves at
-        # backup/restore (which treat `source` as a literal path). Track B
-        # relaxes this check when the expansion pipeline lands.
-        if "*" in source:
-            raise ArgitError(
-                f"{where}: globs in items[].source not supported in this release "
-                f"(source='{source}')",
-                "use a literal source; glob expansion ships in a subsequent release",
-            )
         is_dir = source.endswith("/")
         is_globbed = "*" in source
         # Kind-specific shape validation.
@@ -787,3 +776,273 @@ def load_manifest(repo_root: Path) -> Manifest:
         filename=path.name,
         overlay_path=overlay_path,
     )
+
+
+# ---------- Track B — glob expansion ----------
+
+def _origin_file(manifest: Manifest, origin: str) -> str:
+    """Map an item/rule origin label to its source manifest filename, for
+    runtime-duplicate error messages. Overlay path is optional; bundled
+    filename is always present."""
+    if origin == "overlay" and manifest.overlay_path is not None:
+        return manifest.overlay_path.name
+    return manifest.filename
+
+
+def expand_globbed_item(
+    item: Item, root: Path, agent_type: str, exclude_patterns: list[str] | None = None,
+) -> list[Item]:
+    """Expand a globbed item into concrete Item instances.
+
+    Args:
+      item: the (possibly globbed) source item from the manifest. If
+        `item.is_globbed` is False, returns [item] unchanged.
+      root: the filesystem root against which the glob matches. Backup
+        callers pass `source_root`; restore-side enumeration is handled by
+        `enumerate_restore_targets` — this helper is source-side only.
+      agent_type: passed through to path_conventions for target/pass derivation.
+      exclude_patterns: manifest.exclude list; concrete expansions matching
+        any pattern are silently dropped (AC-B9).
+
+    Returns:
+      list[Item] — concrete items with derived target/pass_path, origin
+      preserved. Empty list when zero matches (caller warn-and-continues).
+      Sorted deterministically for stable git diffs.
+    """
+    if not item.is_globbed:
+        return [item]
+
+    # `Path.glob` needs its pattern relative to the root. `item.source` is
+    # already relative. Trailing slash (dir glob) is stripped — Path.glob
+    # doesn't accept it, we restore the slash on matched-dir sources below.
+    pattern = item.source.rstrip("/")
+    root_path = Path(root)
+    matches = sorted(root_path.glob(pattern))
+    out: list[Item] = []
+    dir_glob = item.source.endswith("/")
+    excludes = exclude_patterns or []
+    for m in matches:
+        try:
+            rel = m.relative_to(root_path)
+        except ValueError:
+            continue
+        if dir_glob and not m.is_dir():
+            continue
+        source_rel = str(rel)
+        if dir_glob:
+            source_rel = source_rel + "/"
+        if matches_exclude(Path(source_rel), excludes):
+            continue
+        if item.kind == "secret":
+            target = None
+            pass_p = path_conventions.derive_item_pass(agent_type, source_rel)
+        else:
+            target = path_conventions.derive_item_target(agent_type, item.kind, source_rel)
+            pass_p = None
+        out.append(Item(
+            kind=item.kind,
+            source=source_rel,
+            mode=item.mode,
+            target=target,
+            pass_path=pass_p,
+            origin=item.origin,
+        ))
+    return out
+
+
+def enumerate_restore_targets(
+    item: Item, repo_root: Path, agent_type: str,
+) -> list[Item]:
+    """Restore-side expansion — enumerates concrete target paths already
+    written to the repo (not source_root, which may be empty in DR scenarios).
+
+    For each globbed item: (1) derive the target-pattern via
+    path_conventions.derive_item_target (which yields a pattern containing
+    `*`), (2) enumerate via repo_root.glob, (3) for each concrete match,
+    invert_item_target to reconstruct the on-disk source, (4) synthesize
+    a concrete Item. `kind=secret` globs are not supported here —
+    secret pass entries are enumerated by the caller via pass list+filter,
+    not via repo-filesystem walk.
+
+    For non-globbed items, returns [item] unchanged.
+    """
+    if not item.is_globbed:
+        return [item]
+    if item.kind == "secret":
+        raise ArgitError(
+            "enumerate_restore_targets: kind=secret glob enumeration must "
+            "go through pass_store.ls (not repo-filesystem glob)",
+            "use expand_globbed_item(item, source_root, ...) at backup time "
+            "and a pass-based enumeration at restore time",
+        )
+    dir_glob = item.source.endswith("/")
+    pattern = path_conventions.derive_item_target(agent_type, item.kind, item.source)
+    pattern = pattern.rstrip("/")
+    repo_root_p = Path(repo_root)
+    matches = sorted(repo_root_p.glob(pattern))
+    out: list[Item] = []
+    for m in matches:
+        if dir_glob and not m.is_dir():
+            continue
+        try:
+            rel = m.relative_to(repo_root_p)
+        except ValueError:
+            continue
+        target_rel = str(rel)
+        if dir_glob:
+            target_rel = target_rel + "/"
+        # invert_item_target precondition — concrete (no *). The Path.glob
+        # enumeration guarantees this.
+        source_rel = path_conventions.invert_item_target(agent_type, item.kind, target_rel)
+        out.append(Item(
+            kind=item.kind,
+            source=source_rel,
+            mode=item.mode,
+            target=target_rel,
+            pass_path=None,
+            origin=item.origin,
+        ))
+    return out
+
+
+def expand_items_for_backup(
+    manifest: Manifest,
+    source_root: Path,
+    warn: Any = None,
+) -> list[Item]:
+    """Expand every globbed item in `manifest.items` against `source_root`,
+    flatten, and detect runtime duplicates across the expanded set.
+
+    Args:
+      manifest, source_root: as expected.
+      warn: optional callable(str). If provided, zero-match globs emit
+        `"globbed item '<source>' matched nothing — skipping"` before
+        being dropped. If None, zero-match is silent (unit-test convenience).
+
+    AC-INT5: two items (bundled glob + overlay explicit, or two globs) that
+    expand to the same concrete source raise ArgitError naming both origin
+    items and their source manifest files.
+    """
+    out: list[Item] = []
+    by_source: dict[tuple[str, str], Item] = {}
+    for it in manifest.items:
+        expanded = expand_globbed_item(
+            it, source_root, manifest.agent_type, manifest.exclude,
+        )
+        if it.is_globbed and len(expanded) == 0 and warn is not None:
+            warn(f"globbed item '{it.source}' matched nothing — skipping")
+        for exp in expanded:
+            key = (exp.source, exp.kind)
+            if key in by_source:
+                prev = by_source[key]
+                raise ArgitError(
+                    f"runtime duplicate: concrete (source='{exp.source}', kind='{exp.kind}') "
+                    f"expanded from two items — "
+                    f"one ({prev.origin} in {_origin_file(manifest, prev.origin)}), "
+                    f"one ({exp.origin} in {_origin_file(manifest, exp.origin)})",
+                    "disambiguate by removing the conflicting overlay or bundled item; "
+                    "see MANIFEST.md §Globs in items",
+                )
+            by_source[key] = exp
+            out.append(exp)
+    return out
+
+
+def enumerate_secret_glob_from_pass(
+    item: Item, agent_type: str, pass_entries: list[str],
+) -> list[Item]:
+    """Restore-side enumeration for a globbed `kind=secret` item.
+
+    Derives the pass pattern from `item.source` + agent_type, then filters
+    `pass_entries` component-wise (single-component `*` wildcard). For each
+    match, substitutes the captured components back into `item.source` to
+    reconstruct the concrete on-disk source.
+    """
+    if not item.is_globbed:
+        return [item]
+    if item.kind != "secret":
+        raise ArgitError(
+            "enumerate_secret_glob_from_pass: non-secret kind passed",
+            "use enumerate_restore_targets for kind=data|sqlite|blob",
+        )
+    pass_pattern = path_conventions.derive_item_pass(agent_type, item.source)
+    pattern_parts = pass_pattern.split("/")
+    src_template = item.source.split("/")
+    out: list[Item] = []
+    for entry in sorted(pass_entries):
+        entry_parts = entry.split("/")
+        if len(entry_parts) != len(pattern_parts):
+            continue
+        captures: list[str] = []
+        matched = True
+        for pp, ep in zip(pattern_parts, entry_parts):
+            if pp == "*":
+                captures.append(ep)
+                continue
+            if pp != ep:
+                matched = False
+                break
+        if not matched:
+            continue
+        cap_iter = iter(captures)
+        concrete_parts = [next(cap_iter) if p == "*" else p for p in src_template]
+        concrete_source = "/".join(concrete_parts)
+        out.append(Item(
+            kind="secret",
+            source=concrete_source,
+            mode=item.mode,
+            target=None,
+            pass_path=entry,
+            origin=item.origin,
+        ))
+    return out
+
+
+def expand_items_for_restore(
+    manifest: Manifest,
+    repo_root: Path,
+    pass_entries: list[str] | None = None,
+    warn: Any = None,
+) -> list[Item]:
+    """Restore-side companion to expand_items_for_backup.
+
+    - Non-secret globbed items enumerate via repo-filesystem glob (AC-B7:
+      fresh-DR scenario where source_root is empty but the repo has every
+      concrete target).
+    - Secret globbed items enumerate from `pass_entries` (PassWrap.ls()
+      result). If pass_entries is None and a globbed secret is present,
+      returns the globbed item unchanged (caller must handle).
+
+    Args:
+      warn: optional callable(str). Emits a warning on zero-match globs so
+        operator-confusion cases (repo missing expected multi-agent data)
+        surface instead of silently skipping.
+    """
+    out: list[Item] = []
+    by_key: dict[tuple[str, str], Item] = {}
+    for it in manifest.items:
+        if it.is_globbed and it.kind == "secret":
+            if pass_entries is None:
+                out.append(it)
+                continue
+            expanded = enumerate_secret_glob_from_pass(
+                it, manifest.agent_type, pass_entries,
+            )
+        else:
+            expanded = enumerate_restore_targets(it, repo_root, manifest.agent_type)
+        if it.is_globbed and len(expanded) == 0 and warn is not None:
+            warn(f"globbed item '{it.source}' matched nothing at restore — no data to restore for this pattern")
+        for exp in expanded:
+            key = (exp.source, exp.kind)
+            if key in by_key:
+                prev = by_key[key]
+                raise ArgitError(
+                    f"runtime duplicate at restore: concrete (source='{exp.source}', "
+                    f"kind='{exp.kind}') from two items — "
+                    f"one ({prev.origin} in {_origin_file(manifest, prev.origin)}), "
+                    f"one ({exp.origin} in {_origin_file(manifest, exp.origin)})",
+                    "inspect the repo / pass-store for stale entries or manifest conflicts",
+                )
+            by_key[key] = exp
+            out.append(exp)
+    return out

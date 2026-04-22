@@ -28,7 +28,7 @@ from pathlib import Path
 import click
 
 from .errors import ArgitError
-from .manifest import Item, Lifecycle, Manifest, load_manifest
+from .manifest import Item, Lifecycle, Manifest, expand_items_for_restore, load_manifest
 from .passwrap import PassWrap
 from .sanitize import find_placeholders, reinject
 from .shared import (
@@ -236,6 +236,16 @@ def run_restore(repo_root: Path, *, target: str | None, overwrite: bool, merge: 
             else:
                 target_path.mkdir(parents=True, exist_ok=True)
 
+            # Track B: expand globbed items once. Non-secret globs enumerate
+            # via repo-filesystem (AC-B7); secret globs enumerate from the
+            # pass store. Runtime duplicate detection is internal to the
+            # helper (AC-INT5). Zero-match globs produce no concrete items
+            # for that entry and emit a restore-time warning via `_warn` —
+            # expected when the repo is legitimately missing matches.
+            concrete_items = expand_items_for_restore(
+                manifest, repo_root, pass_entries=pass_wrap.ls(), warn=_warn,
+            )
+
             # Track what we wrote, for verify.
             written_files: list[tuple[Path, str]] = []
 
@@ -266,7 +276,7 @@ def run_restore(repo_root: Path, *, target: str | None, overwrite: bool, merge: 
                 _emit(False, f"restore: {sf.file}")
 
             # 5. Whole-file secrets restore
-            for it in [i for i in manifest.items if i.kind == "secret"]:
+            for it in [i for i in concrete_items if i.kind == "secret"]:
                 dst = target_path / it.source
                 if dry_run:
                     _emit(True, f"pass show {it.pass_path} → {dst}")
@@ -282,7 +292,7 @@ def run_restore(repo_root: Path, *, target: str | None, overwrite: bool, merge: 
                 _emit(False, f"secret: {it.source}")
 
             # 6. Data restore
-            for it in [i for i in manifest.items if i.kind == "data"]:
+            for it in [i for i in concrete_items if i.kind == "data"]:
                 src = repo_root / it.target
                 dst = target_path / it.source.rstrip("/") if it.is_dir_source else target_path / it.source
                 if it.is_dir_source:
@@ -308,7 +318,7 @@ def run_restore(repo_root: Path, *, target: str | None, overwrite: bool, merge: 
                 _emit(False, f"data: {it.source}")
 
             # 7. SQLite restore
-            for it in [i for i in manifest.items if i.kind == "sqlite"]:
+            for it in [i for i in concrete_items if i.kind == "sqlite"]:
                 src = repo_root / it.target
                 dst = target_path / it.source
                 if not src.is_file():
@@ -326,7 +336,7 @@ def run_restore(repo_root: Path, *, target: str | None, overwrite: bool, merge: 
             # 8. Blob restore. Pre-scan repo-side blob sources for LFS pointers
             # BEFORE copying anything — failing mid-loop would leave partial
             # state in the target.
-            blob_items = [i for i in manifest.items if i.kind == "blob"]
+            blob_items = [i for i in concrete_items if i.kind == "blob"]
             for it in blob_items:
                 src = repo_root / it.target
                 if not src.is_dir():
@@ -374,12 +384,12 @@ def run_restore(repo_root: Path, *, target: str | None, overwrite: bool, merge: 
                         verify_failures.append(f"{dst}: leftover placeholder at {path_} (pass: {pp})")
 
                 # (b) every kind: secret pass path resolves
-                for it in [i for i in manifest.items if i.kind == "secret"]:
+                for it in [i for i in concrete_items if i.kind == "secret"]:
                     if not pass_wrap.has(it.pass_path):
                         verify_failures.append(f"pass path missing: {it.pass_path}")
 
                 # (c) every SQLite file opens cleanly
-                for it in [i for i in manifest.items if i.kind == "sqlite"]:
+                for it in [i for i in concrete_items if i.kind == "sqlite"]:
                     dst = target_path / it.source
                     if not dst.is_file():
                         continue
@@ -403,7 +413,7 @@ def run_restore(repo_root: Path, *, target: str | None, overwrite: bool, merge: 
                         )
 
                 # (e) check for LFS pointers in blob outputs (extra safety)
-                for it in [i for i in manifest.items if i.kind == "blob"]:
+                for it in [i for i in concrete_items if i.kind == "blob"]:
                     dst = target_path / it.source.rstrip("/")
                     if not dst.is_dir():
                         continue

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import fnmatch
 import os
 import re
 import shutil
@@ -22,6 +23,29 @@ from pathlib import Path
 from typing import Iterator
 
 from .errors import ArgitError
+
+
+def matches_exclude(rel: Path, patterns: list[str]) -> bool:
+    """Match `rel` against a manifest exclude pattern.
+
+    Pattern semantics (intentionally looser than shell glob):
+    - Trailing `/` → directory prefix; matches the directory and everything under it.
+    - `*` matches across path separators (so `*.sqlite-wal` matches
+      `tasks/runs.sqlite-wal`). This deviates from POSIX `fnmatch` but matches
+      operator intent for manifest-author-friendly patterns.
+
+    Hoisted from backup.py (pre-Track-B) so expand_globbed_item in manifest.py
+    can share the logic without creating a backup.py → manifest.py cycle.
+    """
+    s = str(rel)
+    for pat in patterns:
+        if pat.endswith("/") and (s + "/").startswith(pat):
+            return True
+        if fnmatch.fnmatch(s, pat):
+            return True
+        if pat.endswith("/") and s.startswith(pat):
+            return True
+    return False
 
 IT_BACKUP_FPR = "1107BD74F292CD3EAB0CF59D49F2D3353A88D34E"
 IT_BACKUP_UID = "IT Backup <a@blinkbtc.com>"
