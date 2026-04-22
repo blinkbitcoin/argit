@@ -78,7 +78,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.write:
         _write_catalog(computed)
-        print(f"wrote {len(computed)} entries to {CATALOG_PATH.relative_to(_REPO_ROOT)}")
+        try:
+            rel = CATALOG_PATH.relative_to(_REPO_ROOT)
+        except ValueError:
+            rel = CATALOG_PATH  # tests may monkey-patch CATALOG_PATH outside the repo
+        print(f"wrote {len(computed)} entries to {rel}")
         return 0
 
     diff = _diff(committed, computed)

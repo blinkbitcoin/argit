@@ -6,6 +6,7 @@ Idempotent. See tech-spec-01-mvp.md §Task 9.1 for the canonical sequence.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 from importlib import resources
@@ -17,6 +18,7 @@ from . import path_conventions
 from .errors import ArgitError
 from .gpgwrap import GpgWrap
 from .hashing import canonical_hash
+from .manifest import parse_filename
 from .shared import (
     IT_BACKUP_FPR,
     IT_BACKUP_UID,
@@ -93,11 +95,11 @@ def _load_hash_catalog() -> dict[str, str]:
     as "no catalog" and degrade gracefully.
     """
     pkg = resources.files("argit.manifest_templates")
-    candidate = pkg.joinpath("hashes.json")
-    try:
-        body = json.loads(Path(str(candidate)).read_text(encoding="utf-8"))
-    except (FileNotFoundError, AttributeError):
+    candidate = Path(str(pkg.joinpath("hashes.json")))
+    if not candidate.is_file():
         return {}
+    try:
+        body = json.loads(candidate.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise ArgitError(
             f"hash catalog hashes.json is malformed: {exc.msg} (line {exc.lineno})",
@@ -124,8 +126,6 @@ def _classify_drift(repo_manifest_path: Path) -> tuple[str, int | None]:
                                      where N is older than the current bundled
       ("operator_modified", None) — hash matches nothing in the catalog
     """
-    from .manifest import parse_filename  # local import — avoids cycle
-
     digest = canonical_hash(repo_manifest_path)
     catalog = _load_hash_catalog()
     if not catalog:
@@ -428,8 +428,8 @@ def _handle_drift(
         return
 
     if drift == "operator_modified":
-        click.echo(
-            f"= manifest drift: operator-modified ({repo_manifest_path.name}). "
+        _already(
+            f"manifest drift: operator-modified ({repo_manifest_path.name}). "
             f"Leaving alone. If you intended operator extensions, move them to "
             f"`.manifest.local.json` — see MANIFEST.md §Overlay."
         )
@@ -442,8 +442,8 @@ def _handle_drift(
             _emit(True, f"drift: stale bundle (rev {matched_rev} → {latest_rev}); "
                         f"--no-upgrade-manifest set, would skip upgrade")
         else:
-            click.echo(
-                f"= manifest drift: stale bundle (rev {matched_rev} → {latest_rev} available); "
+            _already(
+                f"manifest drift: stale bundle (rev {matched_rev} → {latest_rev} available); "
                 f"--no-upgrade-manifest set, skipping upgrade."
             )
         return
@@ -464,12 +464,21 @@ def _handle_drift(
             nl=False,
         )
         try:
-            answer = click.get_text_stream("stdin").readline().strip().lower()
+            raw = click.get_text_stream("stdin").readline()
         except KeyboardInterrupt:
             raise click.exceptions.Abort()
+        # Distinguish EOF ("") from empty-line-with-enter ("\n"). EOF means
+        # no TTY (piped invocation / CI without --yes) — do NOT silently
+        # auto-accept an upgrade in that case.
+        if raw == "":
+            raise ArgitError(
+                "no answer received on stdin (EOF); will not auto-accept the manifest upgrade",
+                "pass --yes to auto-accept, or --no-upgrade-manifest to skip drift prompts",
+            )
+        answer = raw.strip().lower()
         if answer not in ("", "y", "yes"):
-            click.echo(
-                f"= leaving {repo_manifest_path.name} at rev {matched_rev}. "
+            _already(
+                f"leaving {repo_manifest_path.name} at rev {matched_rev}. "
                 f"Run with --no-upgrade-manifest to suppress this prompt."
             )
             return
@@ -479,15 +488,13 @@ def _handle_drift(
     target = manifest_dir / bundled.name
     with in_progress_marker(repo_root):
         # Write the new bundled body to <file>.new, then atomically replace.
+        # When the bundled filename differs from the repo's (revision bump),
+        # the old file must be unlinked after — otherwise find_manifest_file
+        # sees two manifests. The acquire_lock + in_progress_marker wrapping
+        # run_setup keeps this window safe from concurrent argit processes.
         new_path.write_bytes(bundled.read_bytes())
-        # If the bundled filename differs from the repo's (revision bump),
-        # remove the old file after writing the new — os.replace is the
-        # atomic swap for same-name; for rename we do write-then-unlink-old.
-        import os
-        if target.name == repo_manifest_path.name:
-            os.replace(new_path, target)
-        else:
-            os.replace(new_path, target)
+        os.replace(new_path, target)
+        if target.name != repo_manifest_path.name:
             repo_manifest_path.unlink(missing_ok=True)
     _emit(False, f"upgraded manifest: rev {matched_rev} → {latest_rev} ({target.name})")
 

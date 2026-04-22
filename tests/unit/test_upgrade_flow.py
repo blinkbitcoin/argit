@@ -26,6 +26,7 @@ import pytest
 from click.testing import CliRunner
 
 from argit.cli import _cli
+from argit.errors import ArgitError
 from argit.gpgwrap import GpgKey
 from argit.hashing import canonical_hash
 from argit.setup import _cleanup_stale_upgrade_files
@@ -222,3 +223,99 @@ def test_a7_operator_modified_preserved_byte_identical(tmp_path):
         assert "operator-modified" in result.output
         assert ".manifest.local.json" in result.output
         assert repo_mfile.read_bytes() == original_bytes
+
+
+# ---------- AC-A4 — actual upgrade write path (both interactive + --yes) ----------
+
+def test_a4_upgrade_interactive_y_writes_new_bundled(tmp_path):
+    """Interactive Y acceptance actually writes bundled bytes, removes .new,
+    and the on-disk hash matches the catalog's latest-rev entry."""
+    repo_manifest_src, catalog, latest_rev = _fake_catalog(repo_rev=1)
+    from argit.setup import _bundled_manifest_path
+    bundled = _bundled_manifest_path()
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=str(tmp_path)) as cwd:
+        repo = _stage_repo_in_cwd(cwd, repo_manifest_src)
+        mdir = repo / ".argit" / "manifest"
+        old_mfile = mdir / repo_manifest_src.name
+        new_mfile = mdir / bundled.name
+
+        with _stub_setup_env(catalog):
+            result = runner.invoke(_cli, ["setup"], input="y\n")
+        assert result.exit_code == 0, result.output + repr(result.exception)
+        assert f"upgraded manifest: rev 1 → {latest_rev}" in result.output
+        assert new_mfile.is_file()
+        # If bundled name differs from the original (rev bump), the old file
+        # should be gone.
+        if old_mfile.name != new_mfile.name:
+            assert not old_mfile.exists()
+        # Bytes on disk match the bundled (canonical-hash-matches-catalog).
+        assert canonical_hash(new_mfile) == catalog[bundled.name]
+        # No stale .new siblings.
+        assert list(mdir.glob("*.manifest.json.new")) == []
+
+
+def test_a4_upgrade_yes_flag_writes_new_bundled(tmp_path):
+    """--yes (non-dry-run) auto-accepts without stdin and writes bundled."""
+    repo_manifest_src, catalog, latest_rev = _fake_catalog(repo_rev=1)
+    from argit.setup import _bundled_manifest_path
+    bundled = _bundled_manifest_path()
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=str(tmp_path)) as cwd:
+        repo = _stage_repo_in_cwd(cwd, repo_manifest_src)
+        mdir = repo / ".argit" / "manifest"
+        new_mfile = mdir / bundled.name
+
+        with _stub_setup_env(catalog):
+            result = runner.invoke(_cli, ["setup", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert f"upgraded manifest: rev 1 → {latest_rev}" in result.output
+        assert new_mfile.is_file()
+        assert canonical_hash(new_mfile) == catalog[bundled.name]
+        assert list(mdir.glob("*.manifest.json.new")) == []
+
+
+def test_upgrade_declined_preserves_manifest(tmp_path):
+    """Answering 'n' at the prompt leaves the old manifest untouched."""
+    repo_manifest_src, catalog, _ = _fake_catalog(repo_rev=1)
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=str(tmp_path)) as cwd:
+        repo = _stage_repo_in_cwd(cwd, repo_manifest_src)
+        mdir = repo / ".argit" / "manifest"
+        old_mfile = mdir / repo_manifest_src.name
+        original_bytes = old_mfile.read_bytes()
+
+        with _stub_setup_env(catalog):
+            result = runner.invoke(_cli, ["setup"], input="n\n")
+        assert result.exit_code == 0, result.output
+        assert "leaving" in result.output
+        assert old_mfile.read_bytes() == original_bytes
+
+
+# ---------- AC-A4 addendum — EOF-on-stdin does NOT silently upgrade ----------
+
+def test_eof_on_stdin_without_yes_raises_rather_than_auto_accept(tmp_path):
+    """Non-TTY invocation without --yes must abort, not silently upgrade.
+
+    The readline() returns "" on EOF; without an explicit guard the code
+    would treat EOF as the Y-default and proceed with the upgrade — a
+    safety hazard for piped / CI invocations."""
+    repo_manifest_src, catalog, _ = _fake_catalog(repo_rev=1)
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=str(tmp_path)) as cwd:
+        repo = _stage_repo_in_cwd(cwd, repo_manifest_src)
+        mdir = repo / ".argit" / "manifest"
+        old_mfile = mdir / repo_manifest_src.name
+        original_bytes = old_mfile.read_bytes()
+
+        with _stub_setup_env(catalog):
+            # input="" → stdin EOF immediately, no newline.
+            result = runner.invoke(_cli, ["setup"], input="")
+        assert result.exit_code != 0, result.output
+        # CliRunner doesn't route through cli._entrypoint's ArgitError
+        # handler, so the diagnosis lives on result.exception.
+        assert isinstance(result.exception, ArgitError)
+        assert "EOF" in result.exception.diagnosis or "no answer" in result.exception.diagnosis
+        assert "--yes" in result.exception.remediation
+        # Manifest preserved — upgrade did NOT fire.
+        assert old_mfile.read_bytes() == original_bytes

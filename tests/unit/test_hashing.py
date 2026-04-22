@@ -124,3 +124,34 @@ def test_added_key_different_hash(tmp_path):
     a = _write(tmp_path / "a.json", '{"x":1}')
     b = _write(tmp_path / "b.json", '{"x":1,"y":2}')
     assert canonical_hash(a) != canonical_hash(b)
+
+
+# ---------- regression: pinned hash for a known vector ----------
+
+def test_known_vector_hash_stable(tmp_path):
+    """Pin a specific canonical_hash output for a specific input.
+
+    Guards against CPython json.dumps changes (float precision, Unicode
+    normalization, new kwargs) silently flipping bundled-manifest
+    classifications from clean → operator_modified. Spec pre-mortem
+    (tech-spec §Notes — Pre-mortem risk items) flags this as a known risk.
+
+    If this test breaks on a newer Python: investigate before rebuilding
+    the catalog — an operator's stable manifest may flip classification.
+    """
+    # Fixed input covering: nested object, number, string with non-ASCII
+    # (€ → \\u20ac under ensure_ascii=True), array, bool, null.
+    fixture = _write(
+        tmp_path / "vector.json",
+        '{"a":[1,2,3],"b":true,"c":null,"d":{"nested":"€"},"e":"plain"}',
+    )
+    # Pinned on CPython 3.11.13. Canonical bytes:
+    #   {"a":[1,2,3],"b":true,"c":null,"d":{"nested":"€"},"e":"plain"}
+    # If this fails on a newer Python: audit WHY before updating the
+    # pinned value — an operator's stable manifest may flip classification.
+    expected = "127309678319bdc6d59cea0866b57d84ea20695338dd4e243c51862b9da730d2"
+    got = canonical_hash(fixture)
+    assert got == expected, (
+        f"canonical_hash drift detected: got {got!r}, expected {expected!r}. "
+        f"Investigate before updating the pinned value."
+    )
