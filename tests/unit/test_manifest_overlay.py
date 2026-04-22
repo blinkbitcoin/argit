@@ -519,3 +519,44 @@ def test_origin_sentinel_injection_in_bundled_without_overlay_rejected(tmp_path)
         load_manifest(repo)
     assert "_origin" in str(exc.value)
     assert "unknown field" in str(exc.value)
+
+
+# ---------- AC-INT3 — overlay × bundled glob disjoint coexistence ----------
+
+def test_int3_overlay_literal_coexists_with_bundled_glob(tmp_path):
+    """A bundled manifest containing a glob + an overlay adding a literal
+    on a disjoint source must produce a merged manifest containing both
+    items, tagged with their respective origins.
+
+    rev-6 bundled already ships globbed `agents/*/agent/*` items — this
+    test verifies the overlay literal on a disjoint source coexists.
+    """
+    overlay = {
+        "items": [{"kind": "secret", "source": "custom-plugin/token.json"}],
+    }
+    repo = _stage(tmp_path, _fresh_bundled(), overlay)
+    m = load_manifest(repo)
+
+    # Bundled rev-6 ships the glob; confirm still present with bundled origin.
+    bundled_globs = [
+        i for i in m.items
+        if "*" in i.source and i.origin == "bundled"
+    ]
+    assert len(bundled_globs) >= 1
+
+    # The literal from the overlay is present with overlay origin.
+    overlay_items = [i for i in m.items if i.source == "custom-plugin/token.json"]
+    assert len(overlay_items) == 1
+    assert overlay_items[0].origin == "overlay"
+
+
+def test_int3_overlay_literal_coexists_with_bundled_glob_different_kind(tmp_path):
+    """Overlay on a source-space disjoint from every bundled glob → clean merge."""
+    overlay = {
+        "items": [{"kind": "blob", "source": "operator-plugin/media/"}],
+    }
+    repo = _stage(tmp_path, _fresh_bundled(), overlay)
+    m = load_manifest(repo)
+    assert any(i.source == "operator-plugin/media/" and i.origin == "overlay" for i in m.items)
+    # At least one bundled glob still survives untouched.
+    assert any("*" in i.source and i.origin == "bundled" for i in m.items)

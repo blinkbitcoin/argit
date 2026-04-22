@@ -909,21 +909,31 @@ def enumerate_restore_targets(
 
 
 def expand_items_for_backup(
-    manifest: Manifest, source_root: Path,
+    manifest: Manifest,
+    source_root: Path,
+    warn: Any = None,
 ) -> list[Item]:
     """Expand every globbed item in `manifest.items` against `source_root`,
     flatten, and detect runtime duplicates across the expanded set.
+
+    Args:
+      manifest, source_root: as expected.
+      warn: optional callable(str). If provided, zero-match globs emit
+        `"globbed item '<source>' matched nothing — skipping"` before
+        being dropped. If None, zero-match is silent (unit-test convenience).
 
     AC-INT5: two items (bundled glob + overlay explicit, or two globs) that
     expand to the same concrete source raise ArgitError naming both origin
     items and their source manifest files.
     """
     out: list[Item] = []
-    by_source: dict[tuple[str, str], Item] = {}  # (source, kind) → origin-item
+    by_source: dict[tuple[str, str], Item] = {}
     for it in manifest.items:
         expanded = expand_globbed_item(
             it, source_root, manifest.agent_type, manifest.exclude,
         )
+        if it.is_globbed and len(expanded) == 0 and warn is not None:
+            warn(f"globbed item '{it.source}' matched nothing — skipping")
         for exp in expanded:
             key = (exp.source, exp.kind)
             if key in by_source:
@@ -990,7 +1000,10 @@ def enumerate_secret_glob_from_pass(
 
 
 def expand_items_for_restore(
-    manifest: Manifest, repo_root: Path, pass_entries: list[str] | None = None,
+    manifest: Manifest,
+    repo_root: Path,
+    pass_entries: list[str] | None = None,
+    warn: Any = None,
 ) -> list[Item]:
     """Restore-side companion to expand_items_for_backup.
 
@@ -1000,6 +1013,11 @@ def expand_items_for_restore(
     - Secret globbed items enumerate from `pass_entries` (PassWrap.ls()
       result). If pass_entries is None and a globbed secret is present,
       returns the globbed item unchanged (caller must handle).
+
+    Args:
+      warn: optional callable(str). Emits a warning on zero-match globs so
+        operator-confusion cases (repo missing expected multi-agent data)
+        surface instead of silently skipping.
     """
     out: list[Item] = []
     by_key: dict[tuple[str, str], Item] = {}
@@ -1013,6 +1031,8 @@ def expand_items_for_restore(
             )
         else:
             expanded = enumerate_restore_targets(it, repo_root, manifest.agent_type)
+        if it.is_globbed and len(expanded) == 0 and warn is not None:
+            warn(f"globbed item '{it.source}' matched nothing at restore — no data to restore for this pattern")
         for exp in expanded:
             key = (exp.source, exp.kind)
             if key in by_key:

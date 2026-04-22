@@ -243,7 +243,7 @@ def run_restore(repo_root: Path, *, target: str | None, overwrite: bool, merge: 
             # for that entry — silently skipped at restore (the warning
             # surfaced at backup time).
             concrete_items = expand_items_for_restore(
-                manifest, repo_root, pass_entries=pass_wrap.ls(),
+                manifest, repo_root, pass_entries=pass_wrap.ls(), warn=_warn,
             )
 
             # Track what we wrote, for verify.

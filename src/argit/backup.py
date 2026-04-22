@@ -30,7 +30,7 @@ from typing import Iterable
 import click
 
 from .errors import ArgitError
-from .manifest import Item, Manifest, SanitizeFile, expand_items_for_backup, expand_globbed_item, load_manifest
+from .manifest import Item, Manifest, SanitizeFile, expand_items_for_backup, load_manifest
 from .passwrap import PassWrap
 from .sanitize import sanitize as run_sanitize
 from .shared import (
@@ -233,29 +233,9 @@ def run_backup(repo_root: Path, *, commit: bool, push: bool, strict: bool, dry_r
                 _warn(f"not backed up: {p} — not in manifest")
 
         # Track B: expand globbed items once at the boundary so phases 4-7
-        # iterate concrete items only. Zero-match globs are warned per-item
-        # and dropped (AC-B4). Runtime duplicate detection across the
-        # expanded set fires inside expand_items_for_backup (AC-INT5).
-        concrete_items: list[Item] = []
-        for it in manifest.items:
-            expanded = expand_globbed_item(
-                it, source_root, manifest.agent_type, manifest.exclude,
-            )
-            if it.is_globbed and len(expanded) == 0:
-                _warn(f"globbed item '{it.source}' matched nothing — skipping")
-            concrete_items.extend(expanded)
-        # Second pass: duplicate detection on the flattened list.
-        seen_sources: dict[tuple[str, str], Item] = {}
-        for exp in concrete_items:
-            key = (exp.source, exp.kind)
-            if key in seen_sources:
-                prev = seen_sources[key]
-                raise ArgitError(
-                    f"runtime duplicate: concrete (source='{exp.source}', kind='{exp.kind}') "
-                    f"expanded from two items — one ({prev.origin}), one ({exp.origin})",
-                    "disambiguate by removing the conflicting overlay or bundled item",
-                )
-            seen_sources[key] = exp
+        # iterate concrete items only. Zero-match globs warn per-item (AC-B4);
+        # runtime duplicates across the expanded set raise (AC-INT5).
+        concrete_items = expand_items_for_backup(manifest, source_root, warn=_warn)
 
         # The marker enters HERE — right before the first mutating phase.
         # Preflight, unspecified-files walk, and version-check are all read-

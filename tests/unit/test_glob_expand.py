@@ -204,3 +204,79 @@ def test_secret_glob_rejects_non_secret_kind():
     it = _glob_item("data", "agents/*/x.json")
     with pytest.raises(ArgitError):
         enumerate_secret_glob_from_pass(it, "openclaw", [])
+
+
+# ---------- AC-B5 — unspecified-files walk recognizes globbed coverage ----------
+
+def test_b5_unspecified_walk_covers_globbed_items():
+    """A file whose path matches a globbed item's source must be treated
+    as covered by the unspecified-files walk (not flagged with 'not in
+    manifest' warning)."""
+    from argit.backup import _covered_by_items
+
+    items = [
+        _glob_item("data", "agents/*/agent/auth-state.json"),
+    ]
+    # Globbed source matches the rel path → covered.
+    assert _covered_by_items(Path("agents/main/agent/auth-state.json"), items) is True
+    assert _covered_by_items(Path("agents/erbot/agent/auth-state.json"), items) is True
+    # Different filename at same depth → NOT covered.
+    assert _covered_by_items(Path("agents/main/agent/other.json"), items) is False
+    # Wrong depth → NOT covered.
+    assert _covered_by_items(Path("agents/main/auth-state.json"), items) is False
+
+
+def test_b5_unspecified_walk_handles_dir_glob_coverage():
+    """A trailing-slash glob covers the directory and everything under it."""
+    from argit.backup import _covered_by_items
+
+    items = [
+        _glob_item("blob", "agents/*/"),
+    ]
+    # Any path under agents/<something>/ → covered (dir-prefix semantics).
+    assert _covered_by_items(Path("agents/main/any/deep/path.json"), items) is True
+    assert _covered_by_items(Path("agents/erbot/file.txt"), items) is True
+    # Disjoint root → NOT covered.
+    assert _covered_by_items(Path("plugins/main/x.json"), items) is False
+
+
+def test_b5_mixed_globbed_and_literal_items():
+    """Mix of glob + literal items — each still covers its own paths."""
+    from argit.backup import _covered_by_items
+
+    items = [
+        _glob_item("data", "agents/*/agent/auth-state.json"),
+        _glob_item("data", "update-check.json"),  # literal
+    ]
+    assert _covered_by_items(Path("agents/main/agent/auth-state.json"), items) is True
+    assert _covered_by_items(Path("update-check.json"), items) is True
+    assert _covered_by_items(Path("unrelated.json"), items) is False
+
+
+# ---------- restore zero-match warning ----------
+
+def test_restore_zero_match_glob_emits_warning(tmp_path):
+    """Globbed non-secret item whose repo filesystem has no matches must
+    emit a warning via the `warn` callback — prevents silent data-loss
+    for operator-confusion scenarios."""
+    from argit.manifest import Manifest, expand_items_for_restore
+
+    manifest = Manifest(
+        schema_version=1,
+        agent_type="openclaw",
+        agent_version="2026.4.14",
+        manifest_revision=1,
+        source_root="/tmp",
+        source_root_mode="0700",
+        sanitize=[],
+        items=[_glob_item("data", "agents/*/missing.json")],
+        exclude=[],
+        lifecycle=None,
+        filename="openclaw-2026.4.14-1.manifest.json",
+    )
+    messages: list[str] = []
+    result = expand_items_for_restore(
+        manifest, tmp_path, pass_entries=[], warn=messages.append,
+    )
+    assert result == []
+    assert any("matched nothing at restore" in m for m in messages)
