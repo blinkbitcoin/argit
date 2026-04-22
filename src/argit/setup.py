@@ -5,6 +5,7 @@ Idempotent. See tech-spec-01-mvp.md §Task 9.1 for the canonical sequence.
 
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 from importlib import resources
@@ -12,6 +13,7 @@ from pathlib import Path
 
 import click
 
+from . import path_conventions
 from .errors import ArgitError
 from .gpgwrap import GpgWrap
 from .shared import (
@@ -24,9 +26,6 @@ from .shared import (
     require_python,
     require_supported_platform,
 )
-
-LFS_LINE = "openclaw/media/** filter=lfs diff=lfs merge=lfs -text"
-LFS_PATTERN = "openclaw/media/**"
 
 
 def _emit(dry_run: bool, action: str) -> None:
@@ -134,7 +133,27 @@ def _ensure_gitignore(repo_root: Path, dry_run: bool) -> None:
     _emit(False, f"appended to .gitignore: {missing}")
 
 
-def _ensure_gitattributes(repo_root: Path, dry_run: bool) -> None:
+def _read_agent_type(bundled_manifest: Path) -> str:
+    """Read agent_type from a bundled manifest file without invoking the full parser.
+
+    The full parser chains through load_manifest (strict validation). For the
+    LFS-line format step we only need agent_type, so we parse JSON directly —
+    keeps setup.py's _ensure_gitattributes decoupled from manifest grammar
+    evolution.
+    """
+    body = json.loads(bundled_manifest.read_text(encoding="utf-8"))
+    agent_type = body.get("agent_type")
+    if not isinstance(agent_type, str) or not agent_type:
+        raise ArgitError(
+            f"bundled manifest {bundled_manifest.name} missing or has invalid agent_type",
+            "verify the argit installation; manifest templates should ship inside the package",
+        )
+    return agent_type
+
+
+def _ensure_gitattributes(repo_root: Path, agent_type: str, dry_run: bool) -> None:
+    lfs_line = path_conventions.LFS_LINE_TEMPLATE.format(agent_type=agent_type)
+    lfs_pattern = path_conventions.LFS_PATTERN_TEMPLATE.format(agent_type=agent_type)
     ga = repo_root / ".gitattributes"
     existing = ga.read_text(encoding="utf-8") if ga.exists() else ""
     crlf = "\r\n" in existing
@@ -146,9 +165,9 @@ def _ensure_gitattributes(repo_root: Path, dry_run: bool) -> None:
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        if line.split()[0] == LFS_PATTERN:
+        if line.split()[0] == lfs_pattern:
             has_pattern_line = True
-            if line == LFS_LINE:
+            if line == lfs_line:
                 has_exact = True
             else:
                 differing_lines.append(line)
@@ -157,15 +176,15 @@ def _ensure_gitattributes(repo_root: Path, dry_run: bool) -> None:
         return
     if has_pattern_line and not has_exact:
         click.echo(
-            f"! .gitattributes has a different filter for `{LFS_PATTERN}` — review manually:\n  {differing_lines}",
+            f"! .gitattributes has a different filter for `{lfs_pattern}` — review manually:\n  {differing_lines}",
             err=True,
         )
         return
     if dry_run:
-        _emit(True, f"append to .gitattributes: {LFS_LINE}")
+        _emit(True, f"append to .gitattributes: {lfs_line}")
         return
     needs_leading_nl = bool(existing) and not existing.endswith(("\n", "\r\n"))
-    block = (eol if needs_leading_nl else "") + LFS_LINE + eol
+    block = (eol if needs_leading_nl else "") + lfs_line + eol
     ga.write_text(existing + block, encoding="utf-8")
     _emit(False, f"appended LFS line to .gitattributes")
 
@@ -273,7 +292,8 @@ def run_setup(repo_root: Path, *, yes: bool, agent_key: str | None, dry_run: boo
     with acquire_lock(repo_root):
         _ensure_manifest(repo_root, dry_run)
         _ensure_gitignore(repo_root, dry_run)
-        _ensure_gitattributes(repo_root, dry_run)
+        agent_type = _read_agent_type(_bundled_manifest_path())
+        _ensure_gitattributes(repo_root, agent_type, dry_run)
         _ensure_secrets_dir(repo_root, dry_run)
 
         gpg = GpgWrap()

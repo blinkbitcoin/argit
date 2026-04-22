@@ -46,7 +46,7 @@ def _setup_repo_and_backup(tmp_path: Path, gnupg_home: Path, fpr: str) -> tuple[
 
     mdir = repo / ".argit" / "manifest"; mdir.mkdir(parents=True)
     shutil.copy2(BUNDLED, mdir / BUNDLED.name)
-    (repo / ".gitattributes").write_text("openclaw/media/** filter=lfs diff=lfs merge=lfs -text\n")
+    (repo / ".gitattributes").write_text("openclaw/blob/** filter=lfs diff=lfs merge=lfs -text\n")
     (repo / ".gitignore").write_text(".argit/in-progress\n.argit/lock\n")
     secrets = repo / "secrets"; secrets.mkdir()
     pass_env = {**env, "PASSWORD_STORE_DIR": str(secrets)}
@@ -156,16 +156,14 @@ def test_restore_verify_catches_lfs_pointer(tmp_path, gnupg_home, ephemeral_gpg_
     # Inject a kind:blob item with a pointer-file in its repo target.
     manifest_path = repo / ".argit" / "manifest" / BUNDLED.name
     body = _json.loads(manifest_path.read_text())
-    body["items"].append({
-        "kind": "blob",
-        "source": "media/inbound/",
-        "target": "openclaw/media/inbound/",
-        "mode": "0644",
-        "blob_backend": "git-lfs",
-    })
+    # Use a source distinct from bundled items (which already contain
+    # media/inbound/ under Track D — the parse-time ambiguity check would
+    # otherwise reject a duplicate source+kind).
+    body["items"].append({"kind": "blob", "source": "media/test-pointer/"})
     manifest_path.write_text(_json.dumps(body))
 
-    blob_dir = repo / "openclaw" / "media" / "inbound"
+    # Target path is now convention-derived: openclaw/blob/<source>
+    blob_dir = repo / "openclaw" / "blob" / "media" / "test-pointer"
     blob_dir.mkdir(parents=True)
     (blob_dir / "image.bin").write_bytes(
         b"version https://git-lfs.github.com/spec/v1\n"

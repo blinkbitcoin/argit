@@ -55,7 +55,7 @@ def test_setup_dryrun_partially_set_up(mock_gpg, tmp_path):
         (mdir / bundled.name).write_text(bundled.read_text())
         # Pre-seed gitignore + gitattributes + secrets dir
         Path(cwd, ".gitignore").write_text(".argit/in-progress\n.argit/lock\n")
-        Path(cwd, ".gitattributes").write_text("openclaw/media/** filter=lfs diff=lfs merge=lfs -text\n")
+        Path(cwd, ".gitattributes").write_text("openclaw/blob/** filter=lfs diff=lfs merge=lfs -text\n")
         Path(cwd, "secrets").mkdir()
 
         result = runner.invoke(_cli, ["setup", "--dry-run", "--yes"])
