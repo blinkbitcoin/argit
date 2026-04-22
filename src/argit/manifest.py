@@ -213,10 +213,23 @@ def _parse_sanitize(arr: Any, agent_type: str, source_label: str) -> list[Saniti
     if not isinstance(arr, list):
         raise ArgitError("manifest.sanitize must be a list", "see MANIFEST.md §Sanitize rules")
     out: list[SanitizeFile] = []
+    seen_files: dict[str, int] = {}
     for i, sf in enumerate(arr):
         where = f"sanitize[{i}] ({source_label})"
         _check_unknown_keys(sf, _ALLOWED_SANITIZE_KEYS, where)
         file = _require(sf, "file", where)
+        # Uniqueness invariant: Track D derives sanitize target from `file`, so
+        # two blocks with the same `file` would produce identical derived
+        # targets. Track C's overlay merge relies on this invariant — enforce
+        # it at parse time within-source.
+        if file in seen_files:
+            raise ArgitError(
+                f"{where}: duplicate sanitize.file '{file}' "
+                f"(also at sanitize[{seen_files[file]}] ({source_label}))",
+                "each sanitize block must target a unique file; merge the rules[] "
+                "arrays into a single block or rename one of the files",
+            )
+        seen_files[file] = i
         mode_raw = sf.get("mode", DEFAULT_SANITIZE_MODE)
         out.append(
             SanitizeFile(
