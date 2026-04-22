@@ -146,25 +146,47 @@ def validate_glob_source(source: str) -> None:
 
 
 def targets_overlap(source_a: str, source_b: str) -> bool:
-    """Component-wise overlap check for two item sources.
+    """Component-wise overlap check for two item sources, with
+    directory-prefix semantics.
 
-    Two sources overlap iff:
-    - same number of path components (same length), AND
-    - at every position, either the two components are equal OR at least one
-      is `*`.
+    Two sources overlap iff their shared path prefix is component-wise
+    compatible (equal OR at-least-one-is-`*` at every shared position) AND
+    EITHER:
+      - they have the same length (equal-depth overlap: literal dup, or a
+        `*` component hitting a literal), OR
+      - the shorter source is a directory (ends with `/`) and so is a
+        prefix of the longer source.
 
-    Literal-literal at identical paths → True. Literal vs star at same length
-    → True. Different lengths → False. Used by the parse-time ambiguity
-    check (AC-D19) and the cross-source merge check (AC-INT6).
+    This handles the real-world backup-time collision where a dir source
+    like `telegram/` and a file source like `telegram/foo.json` BOTH
+    forward-derive into nested paths under the same repo target tree —
+    `copytree` of the dir plus explicit-copy of the file would double-write
+    the same file.
+
+    Literal-literal at identical paths → True.
+    Literal vs star at same depth → True.
+    `telegram/` vs `telegram/foo.json` → True (dir-prefix overlap).
+    `telegram/` vs `other/foo.json` → False (prefixes diverge at position 0).
+    `a/b/c` vs `a/b/c/d` where neither ends in `/` → False (neither is a dir
+    prefix of the other; literal file at `a/b/c` can't contain files).
     """
-    comps_a = source_a.split("/")
-    comps_b = source_b.split("/")
-    if len(comps_a) != len(comps_b):
-        return False
-    for ca, cb in zip(comps_a, comps_b):
+    norm_a = source_a.rstrip("/")
+    norm_b = source_b.rstrip("/")
+    a_is_dir = source_a.endswith("/")
+    b_is_dir = source_b.endswith("/")
+
+    comps_a = norm_a.split("/") if norm_a else []
+    comps_b = norm_b.split("/") if norm_b else []
+
+    shared = min(len(comps_a), len(comps_b))
+    for ca, cb in zip(comps_a[:shared], comps_b[:shared]):
         if ca == cb:
             continue
         if ca == "*" or cb == "*":
             continue
         return False
-    return True
+
+    if len(comps_a) == len(comps_b):
+        return True
+    shorter_is_dir = a_is_dir if len(comps_a) < len(comps_b) else b_is_dir
+    return shorter_is_dir

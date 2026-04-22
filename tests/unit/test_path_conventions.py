@@ -180,13 +180,21 @@ def test_validate_glob_source_rejects(source, fragment):
         # AC-D19 worked examples.
         ("agents/*/foo.json", "agents/main/foo.json", True),   # star matches literal at same position
         ("agents/*/foo.json", "other/main/foo.json", False),   # different literal at position 0
-        ("agents/*", "agents/*/foo.json", False),              # length mismatch
-        # Additional cases for symmetry & completeness.
+        # Additional same-depth cases.
         ("a/b", "a/b", True),                                   # identical literals
         ("a/*", "*/b", True),                                   # star/star at different positions
         ("a/b", "a/c", False),                                  # different literals, same length
         ("a/*/c", "a/x/c", True),
         ("a/*/c", "a/x/d", False),
+        # Directory-prefix overlap (Copilot review finding — real-world
+        # backup-time collision).
+        ("telegram/", "telegram/foo.json", True),               # dir-prefix overlap
+        ("telegram/", "other/foo.json", False),                 # disjoint
+        ("agents/*/", "agents/main/x.json", True),              # glob dir-prefix overlap
+        ("agents/*/", "plugins/main/x.json", False),            # different root → disjoint
+        # Literal vs deeper literal with NO dir marker → no overlap
+        # (a literal `a/b/c` is a file and can't contain another file).
+        ("agents/main", "agents/main/x.json", False),
     ],
 )
 def test_targets_overlap(a, b, expected):

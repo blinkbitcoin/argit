@@ -197,6 +197,11 @@ def _parse_sanitize_rules(
     out: list[SanitizeRule] = []
     for i, r in enumerate(rules):
         loc = f"{where}.rules[{i}]"
+        if not isinstance(r, dict):
+            raise ArgitError(
+                f"{loc}: expected a JSON object (got {type(r).__name__})",
+                "each sanitize rule must be an object like {\"path\": \".x.y\"}",
+            )
         _check_unknown_keys(r, _ALLOWED_RULE_KEYS, loc)
         path = _require(r, "path", loc)
         if "*" in path:
@@ -216,6 +221,12 @@ def _parse_sanitize(arr: Any, agent_type: str, source_label: str) -> list[Saniti
     seen_files: dict[str, int] = {}
     for i, sf in enumerate(arr):
         where = f"sanitize[{i}] ({source_label})"
+        if not isinstance(sf, dict):
+            raise ArgitError(
+                f"{where}: expected a JSON object (got {type(sf).__name__})",
+                "each sanitize entry must be an object like "
+                "{\"file\": \"...\", \"rules\": [...]}",
+            )
         _check_unknown_keys(sf, _ALLOWED_SANITIZE_KEYS, where)
         file = _require(sf, "file", where)
         # Uniqueness invariant: Track D derives sanitize target from `file`, so
@@ -251,6 +262,11 @@ def _parse_items(arr: Any, agent_type: str, source_label: str) -> list[Item]:
     out: list[Item] = []
     for i, it in enumerate(arr):
         where = f"items[{i}] ({source_label})"
+        if not isinstance(it, dict):
+            raise ArgitError(
+                f"{where}: expected a JSON object (got {type(it).__name__})",
+                "each item must be an object like {\"kind\": \"data\", \"source\": \"foo.json\"}",
+            )
         _check_unknown_keys(it, _ALLOWED_ITEM_KEYS, where)
         kind = _require(it, "kind", where)
         if kind not in VALID_KINDS:
@@ -260,6 +276,18 @@ def _parse_items(arr: Any, agent_type: str, source_label: str) -> list[Item]:
             )
         source = _require(it, "source", where)
         path_conventions.validate_glob_source(source)
+        # Track D accepts the glob GRAMMAR (path_conventions.validate_glob_source)
+        # but does NOT ship the expansion pipeline — that lives in Track B.
+        # Reject any `*` in `source` here so operators can't author a glob
+        # item that parses under Track D and then silently misbehaves at
+        # backup/restore (which treat `source` as a literal path). Track B
+        # relaxes this check when the expansion pipeline lands.
+        if "*" in source:
+            raise ArgitError(
+                f"{where}: globs in items[].source not supported in this release "
+                f"(source='{source}')",
+                "use a literal source; glob expansion ships in a subsequent release",
+            )
         is_dir = source.endswith("/")
         is_globbed = "*" in source
         # Kind-specific shape validation.
