@@ -214,19 +214,28 @@ def _parse_sanitize_rules(
     return out
 
 
+_ORIGIN_SENTINEL = "_origin"
+
+
 def _parse_sanitize(arr: Any, agent_type: str, source_label: str) -> list[SanitizeFile]:
+    """Parse sanitize[]. Per-entry origin may override `source_label` via the
+    `_ORIGIN_SENTINEL` key (set by `_merge` when combining bundled + overlay).
+    """
     if not isinstance(arr, list):
         raise ArgitError("manifest.sanitize must be a list", "see MANIFEST.md §Sanitize rules")
     out: list[SanitizeFile] = []
-    seen_files: dict[str, int] = {}
+    seen_files: dict[str, tuple[int, str]] = {}  # file → (index, origin)
     for i, sf in enumerate(arr):
-        where = f"sanitize[{i}] ({source_label})"
         if not isinstance(sf, dict):
             raise ArgitError(
-                f"{where}: expected a JSON object (got {type(sf).__name__})",
+                f"sanitize[{i}] ({source_label}): expected a JSON object (got {type(sf).__name__})",
                 "each sanitize entry must be an object like "
                 "{\"file\": \"...\", \"rules\": [...]}",
             )
+        per_entry_origin = source_label
+        if _ORIGIN_SENTINEL in sf:
+            per_entry_origin = sf.pop(_ORIGIN_SENTINEL)
+        where = f"sanitize[{i}] ({per_entry_origin})"
         _check_unknown_keys(sf, _ALLOWED_SANITIZE_KEYS, where)
         file = _require(sf, "file", where)
         # Uniqueness invariant: Track D derives sanitize target from `file`, so
@@ -234,13 +243,14 @@ def _parse_sanitize(arr: Any, agent_type: str, source_label: str) -> list[Saniti
         # targets. Track C's overlay merge relies on this invariant — enforce
         # it at parse time within-source.
         if file in seen_files:
+            prev_idx, prev_origin = seen_files[file]
             raise ArgitError(
                 f"{where}: duplicate sanitize.file '{file}' "
-                f"(also at sanitize[{seen_files[file]}] ({source_label}))",
+                f"(also at sanitize[{prev_idx}] ({prev_origin}))",
                 "each sanitize block must target a unique file; merge the rules[] "
                 "arrays into a single block or rename one of the files",
             )
-        seen_files[file] = i
+        seen_files[file] = (i, per_entry_origin)
         mode_raw = sf.get("mode", DEFAULT_SANITIZE_MODE)
         out.append(
             SanitizeFile(
@@ -248,25 +258,30 @@ def _parse_sanitize(arr: Any, agent_type: str, source_label: str) -> list[Saniti
                 target=path_conventions.derive_sanitize_target(agent_type, file),
                 mode=_normalize_mode(mode_raw, f"{where}.mode"),
                 rules=_parse_sanitize_rules(
-                    _require(sf, "rules", where), where, agent_type, file, source_label,
+                    _require(sf, "rules", where), where, agent_type, file, per_entry_origin,
                 ),
-                origin=source_label,
+                origin=per_entry_origin,
             )
         )
     return out
 
 
 def _parse_items(arr: Any, agent_type: str, source_label: str) -> list[Item]:
+    """Parse items[]. Per-entry origin may override `source_label` via the
+    `_ORIGIN_SENTINEL` key (set by `_merge` when combining bundled + overlay)."""
     if not isinstance(arr, list) or len(arr) == 0:
         raise ArgitError("manifest.items must be a non-empty list", "add at least one item")
     out: list[Item] = []
     for i, it in enumerate(arr):
-        where = f"items[{i}] ({source_label})"
         if not isinstance(it, dict):
             raise ArgitError(
-                f"{where}: expected a JSON object (got {type(it).__name__})",
+                f"items[{i}] ({source_label}): expected a JSON object (got {type(it).__name__})",
                 "each item must be an object like {\"kind\": \"data\", \"source\": \"foo.json\"}",
             )
+        per_entry_origin = source_label
+        if _ORIGIN_SENTINEL in it:
+            per_entry_origin = it.pop(_ORIGIN_SENTINEL)
+        where = f"items[{i}] ({per_entry_origin})"
         _check_unknown_keys(it, _ALLOWED_ITEM_KEYS, where)
         kind = _require(it, "kind", where)
         if kind not in VALID_KINDS:
@@ -324,14 +339,16 @@ def _parse_items(arr: Any, agent_type: str, source_label: str) -> list[Item]:
                 mode=mode,
                 target=target,
                 pass_path=pass_p,
-                origin=source_label,
+                origin=per_entry_origin,
             )
         )
     return out
 
 
 def _check_target_ambiguity(items: list[Item], source_label: str) -> None:
-    """AC-D19: pairwise targets_overlap over items in the same source."""
+    """AC-D19 / AC-INT7: pairwise targets_overlap check. Error attribution
+    uses each item's actual origin (bundled vs overlay) rather than the
+    source_label arg — so within-overlay collisions name the overlay."""
     for i in range(len(items)):
         for j in range(i + 1, len(items)):
             a, b = items[i], items[j]
@@ -341,9 +358,17 @@ def _check_target_ambiguity(items: list[Item], source_label: str) -> None:
                 # a meaningful overlap claim.)
                 continue
             if path_conventions.targets_overlap(a.source, b.source):
+                # Origin attribution: name each item's actual origin so
+                # within-overlay collisions (AC-INT7) direct the operator
+                # to the right file.
+                if a.origin == b.origin:
+                    scope = f"(both in {a.origin})"
+                else:
+                    scope = f"({a.origin} + {b.origin})"
                 raise ArgitError(
-                    f"items[{i}] source '{a.source}' and items[{j}] source '{b.source}' "
-                    f"forward-derive to overlapping targets ({source_label})",
+                    f"items[{i}] source '{a.source}' ({a.origin}) and "
+                    f"items[{j}] source '{b.source}' ({b.origin}) "
+                    f"forward-derive to overlapping targets {scope}",
                     "disambiguate the sources; see MANIFEST.md §Path conventions",
                 )
 
@@ -465,41 +490,75 @@ def _merge(
             seen.add(e)
     merged["exclude"] = merged_excl
 
-    # items[] — append with literal duplicate check.
-    bundled_items = list(bundled.get("items", []))
-    overlay_items = list(overlay.get("items", []))
-    literal_index: dict[tuple[str, str], str] = {}
-    for it in bundled_items:
+    # items[] — append with literal duplicate check. Tag each item with
+    # _ORIGIN_SENTINEL so _parse_items can attribute errors correctly.
+    def _tag(it: Any, origin: str) -> Any:
+        if isinstance(it, dict):
+            return {**it, _ORIGIN_SENTINEL: origin}
+        return it
+
+    bundled_items = [_tag(it, "bundled") for it in bundled.get("items", [])]
+    overlay_items = [_tag(it, "overlay") for it in overlay.get("items", [])]
+
+    # Literal-duplicate check — (source, kind) pairs must be unique across
+    # bundled + overlay. Three error shapes for operator clarity:
+    #   - within-overlay (both overlay)  → names overlay file twice + AC-INT7 hint
+    #   - within-bundled (both bundled)  → names bundled file + usual hint
+    #   - cross-source                   → names both origins explicitly
+    literal_index: dict[tuple[str, str], tuple[str, str]] = {}  # key → (origin, file)
+    all_literal = [("bundled", it, bundled_path.name) for it in bundled_items] + \
+                  [("overlay", it, overlay_path.name) for it in overlay_items]
+    for origin, it, file_name in all_literal:
+        if not isinstance(it, dict):
+            continue
         src, kind = it.get("source"), it.get("kind")
-        if isinstance(src, str) and isinstance(kind, str) and "*" not in src:
-            literal_index[(src, kind)] = bundled_path.name
-    for it in overlay_items:
-        src, kind = it.get("source"), it.get("kind")
-        if isinstance(src, str) and isinstance(kind, str) and "*" not in src:
-            key = (src, kind)
-            if key in literal_index:
+        if not (isinstance(src, str) and isinstance(kind, str) and "*" not in src):
+            continue
+        key = (src, kind)
+        if key in literal_index:
+            prev_origin, prev_file = literal_index[key]
+            if prev_origin == origin == "overlay":
                 raise ArgitError(
-                    f"overlay conflict: items[] entry (source='{src}', kind='{kind}') "
-                    f"appears in both {literal_index[key]} and {overlay_path.name}",
-                    f"remove the duplicate from {overlay_path} or the bundled manifest",
+                    f"overlay conflict: items[] has two entries with "
+                    f"(source='{src}', kind='{kind}') within {overlay_path.name}",
+                    f"remove the duplicate from {overlay_path}",
                 )
-            literal_index[key] = overlay_path.name
+            if prev_origin == origin == "bundled":
+                raise ArgitError(
+                    f"bundled manifest has two items[] entries with "
+                    f"(source='{src}', kind='{kind}') within {bundled_path.name}",
+                    "each literal (source, kind) pair must be unique",
+                )
+            raise ArgitError(
+                f"overlay conflict: items[] entry (source='{src}', kind='{kind}') "
+                f"appears in both {prev_file} and {file_name}",
+                f"remove the duplicate from {overlay_path} or the bundled manifest",
+            )
+        literal_index[key] = (origin, file_name)
     merged["items"] = bundled_items + overlay_items
 
-    # sanitize[] — per-file union of rules[].
+    # sanitize[] — per-file union of rules[]. Tag with _ORIGIN_SENTINEL;
+    # malformed entries (non-dict or missing "file") collect in a sidecar
+    # list and are appended at the end for downstream validators to catch.
     bundled_san = list(bundled.get("sanitize", []))
     overlay_san = list(overlay.get("sanitize", []))
-    by_file: dict[str, dict] = {sf["file"]: dict(sf) for sf in bundled_san if isinstance(sf, dict) and "file" in sf}
-    bundled_san_origin: dict[str, str] = {sf["file"]: bundled_path.name for sf in bundled_san if isinstance(sf, dict) and "file" in sf}
+    by_file: dict[str, dict] = {}
+    san_origin: dict[str, str] = {}
+    malformed_san: list[Any] = []
+    for sf in bundled_san:
+        if not isinstance(sf, dict) or "file" not in sf:
+            malformed_san.append(_tag(sf, "bundled"))
+            continue
+        by_file[sf["file"]] = {**sf, _ORIGIN_SENTINEL: "bundled"}
+        san_origin[sf["file"]] = bundled_path.name
     for osf in overlay_san:
         if not isinstance(osf, dict) or "file" not in osf:
-            # Let the downstream parser produce the shape error.
-            by_file[len(by_file)] = osf  # type: ignore[assignment]
+            malformed_san.append(_tag(osf, "overlay"))
             continue
         file = osf["file"]
         if file not in by_file:
-            by_file[file] = dict(osf)
-            bundled_san_origin[file] = overlay_path.name
+            by_file[file] = {**osf, _ORIGIN_SENTINEL: "overlay"}
+            san_origin[file] = overlay_path.name
             continue
         # Merge rules[] with duplicate-path check.
         existing = by_file[file]
@@ -513,17 +572,18 @@ def _merge(
             if r["path"] in b_paths:
                 raise ArgitError(
                     f"overlay conflict: sanitize.file='{file}' has duplicate "
-                    f"rule path '{r['path']}' in both {bundled_san_origin[file]} "
+                    f"rule path '{r['path']}' in both {san_origin[file]} "
                     f"and {overlay_path.name}",
                     f"remove the duplicate rule from {overlay_path}",
                 )
             b_rules.append(r)
             b_paths.add(r["path"])
         existing["rules"] = b_rules
-    merged["sanitize"] = [v for k, v in by_file.items() if isinstance(k, str)] + \
-                        [v for k, v in by_file.items() if not isinstance(k, str)]
+    merged["sanitize"] = list(by_file.values()) + malformed_san
 
-    # lifecycle.<sub> — overlay wins per sub-key.
+    # lifecycle.<sub> — overlay wins per sub-key. AC-C14: validate overlay's
+    # sub-command structure at merge time so ArgitError names the overlay
+    # file, not just the generic "lifecycle.stop.description" location.
     if "lifecycle" in overlay:
         if not isinstance(overlay["lifecycle"], dict):
             raise ArgitError(
@@ -533,7 +593,17 @@ def _merge(
         merged_life = dict(bundled.get("lifecycle", {}) or {})
         for sub in ("detect_running", "stop", "start"):
             if sub in overlay["lifecycle"]:
-                merged_life[sub] = overlay["lifecycle"][sub]
+                sub_body = overlay["lifecycle"][sub]
+                try:
+                    # Pre-validate the overlay sub-command with an overlay-
+                    # attributed `where` string. If structure is bad, we
+                    # raise here with the operator-friendly overlay path.
+                    _parse_lifecycle_cmd(
+                        sub_body, f"overlay {overlay_path.name}: lifecycle.{sub}",
+                    )
+                except ArgitError:
+                    raise
+                merged_life[sub] = sub_body
         merged["lifecycle"] = merged_life
 
     # AC-INT6: cross-source ambiguity check on merged items[]. Within-source

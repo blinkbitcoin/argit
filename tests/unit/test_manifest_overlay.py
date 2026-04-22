@@ -324,3 +324,118 @@ def test_load_overlay_valid_dict(tmp_path):
     p = tmp_path / "x.manifest.local.json"
     p.write_text('{"exclude":["a/"]}')
     assert _load_overlay(p) == {"exclude": ["a/"]}
+
+
+# ---------- AC-C14 — overlay lifecycle structural error attribution ----------
+
+def test_c14_overlay_lifecycle_missing_description_names_overlay(tmp_path):
+    """Overlay lifecycle.stop without `description` must raise with the
+    overlay path attributed, not just the generic `lifecycle.stop.description`
+    location."""
+    overlay = {
+        "lifecycle": {
+            "stop": {"command": ["true"]},  # missing description
+        },
+    }
+    repo = _stage(tmp_path, _fresh_bundled(), overlay)
+    with pytest.raises(ArgitError) as exc:
+        load_manifest(repo)
+    msg = str(exc.value)
+    assert "overlay" in msg.lower()
+    assert ".manifest.local.json" in msg
+    assert "description" in msg
+
+
+def test_c14_overlay_lifecycle_missing_command_names_overlay(tmp_path):
+    overlay = {
+        "lifecycle": {
+            "start": {"description": "custom start"},  # missing command
+        },
+    }
+    repo = _stage(tmp_path, _fresh_bundled(), overlay)
+    with pytest.raises(ArgitError) as exc:
+        load_manifest(repo)
+    msg = str(exc.value)
+    assert "overlay" in msg.lower()
+    assert ".manifest.local.json" in msg
+    assert "command" in msg
+
+
+def test_c14_overlay_lifecycle_non_object_rejected(tmp_path):
+    overlay = {"lifecycle": "not-an-object"}
+    repo = _stage(tmp_path, _fresh_bundled(), overlay)
+    with pytest.raises(ArgitError) as exc:
+        load_manifest(repo)
+    assert "overlay" in str(exc.value).lower()
+    assert ".manifest.local.json" in str(exc.value)
+
+
+# ---------- AC-INT7 — within-overlay ambiguity names overlay as origin ----------
+
+def test_int7_within_overlay_literal_dup_names_overlay(tmp_path):
+    """Two identical overlay literals must raise with the overlay file
+    named as the sole origin (not "in both overlay and overlay")."""
+    overlay = {
+        "items": [
+            {"kind": "data", "source": "plugin/state.json"},
+            {"kind": "data", "source": "plugin/state.json"},
+        ],
+    }
+    repo = _stage(tmp_path, _fresh_bundled(), overlay)
+    with pytest.raises(ArgitError) as exc:
+        load_manifest(repo)
+    msg = str(exc.value)
+    assert "plugin/state.json" in msg
+    assert ".manifest.local.json" in msg
+    # Must NOT imply the bundled is involved.
+    assert "bundled" not in msg.lower() or "within" in msg
+
+
+def test_int7_within_overlay_glob_vs_literal_overlap(tmp_path):
+    overlay = {
+        "items": [
+            {"kind": "data", "source": "plugin/*/state.json"},
+            {"kind": "data", "source": "plugin/main/state.json"},
+        ],
+    }
+    repo = _stage(tmp_path, _fresh_bundled(), overlay)
+    with pytest.raises(ArgitError) as exc:
+        load_manifest(repo)
+    msg = str(exc.value)
+    assert "overlay" in msg
+    assert "both in overlay" in msg or "overlay + overlay" in msg
+
+
+# ---------- origin threading — downstream Item/SanitizeFile carry overlay origin ----------
+
+def test_overlay_items_tagged_overlay_on_dataclass(tmp_path):
+    overlay = {
+        "items": [
+            {"kind": "data", "source": "operator-plugin/state.json"},
+            {"kind": "secret", "source": "operator-plugin/token.json"},
+        ],
+    }
+    repo = _stage(tmp_path, _fresh_bundled(), overlay)
+    m = load_manifest(repo)
+    overlay_items = [i for i in m.items if i.source.startswith("operator-plugin/")]
+    assert len(overlay_items) == 2
+    assert all(i.origin == "overlay" for i in overlay_items)
+    # Bundled items keep "bundled".
+    bundled_items = [i for i in m.items if not i.source.startswith("operator-plugin/")]
+    assert all(i.origin == "bundled" for i in bundled_items)
+
+
+def test_overlay_sanitize_tagged_overlay(tmp_path):
+    overlay = {
+        "sanitize": [{
+            "file": "operator-plugin.json",
+            "rules": [{"path": ".plugin.token"}],
+        }],
+    }
+    repo = _stage(tmp_path, _fresh_bundled(), overlay)
+    m = load_manifest(repo)
+    overlay_sf = [sf for sf in m.sanitize if sf.file == "operator-plugin.json"]
+    assert len(overlay_sf) == 1
+    assert overlay_sf[0].origin == "overlay"
+    bundled_sf = [sf for sf in m.sanitize if sf.file != "operator-plugin.json"]
+    assert all(sf.origin == "bundled" for sf in bundled_sf)
