@@ -23,6 +23,10 @@ where = ["src"]
 [tool.setuptools.package-data]
 argit = [
   "manifest_templates/*.json",
+  "manifest_templates/hashes.json",  # F16: explicit entry guards against a
+                                     # future narrowing of *.json to
+                                     # *.manifest.json silently dropping
+                                     # the drift catalog from the wheel.
   "keys/*.asc",
 ]
 
