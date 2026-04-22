@@ -94,9 +94,10 @@ def test_full_roundtrip(tmp_path, monkeypatch, ephemeral_gpg_key, gnupg_home):
                 leaked.append((str(f.relative_to(repo)), needle))
     assert not leaked, f"plaintext-secret leak detected: {leaked}"
 
-    # AC 8: state files exist with binary content
-    for sqlite_target in ("openclaw/state/memory-main.sqlite", "openclaw/state/tasks-runs.sqlite",
-                          "openclaw/state/flows-registry.sqlite"):
+    # AC 8: state files exist with binary content. Paths are now derived from
+    # source via path_conventions (Track D), preserving separators.
+    for sqlite_target in ("openclaw/sqlite/memory/main.sqlite", "openclaw/sqlite/tasks/runs.sqlite",
+                          "openclaw/sqlite/flows/registry.sqlite"):
         p = repo / sqlite_target
         assert p.is_file() and p.stat().st_size > 0, f"missing/empty: {sqlite_target}"
         # SQLite magic header
