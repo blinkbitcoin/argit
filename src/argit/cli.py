@@ -27,14 +27,18 @@ def main(ctx: click.Context) -> None:
 
 
 @main.command("setup")
-@click.option("--yes", is_flag=True, help="Skip interactive confirmation for IT-key import.")
+@click.option("--yes", is_flag=True, help="Skip interactive confirmation for IT-key import and auto-accept manifest upgrades.")
 @click.option("--agent-key", "agent_key", default=None, help="Operator GPG fingerprint (required when multi-key).")
+@click.option("--no-upgrade-manifest", "no_upgrade_manifest", is_flag=True,
+              help="Do not prompt for bundled manifest upgrades; drift is still reported.")
 @click.option("--dry-run", is_flag=True, help="Print actions without executing.")
 @click.pass_context
-def setup_cmd(ctx: click.Context, yes: bool, agent_key: str | None, dry_run: bool) -> None:
+def setup_cmd(ctx: click.Context, yes: bool, agent_key: str | None,
+              no_upgrade_manifest: bool, dry_run: bool) -> None:
     """One-time bootstrapping inside an existing git-init'd repo."""
     from .setup import run_setup
-    run_setup(ctx.obj["repo_root"], yes=yes, agent_key=agent_key, dry_run=dry_run)
+    run_setup(ctx.obj["repo_root"], yes=yes, agent_key=agent_key,
+              no_upgrade_manifest=no_upgrade_manifest, dry_run=dry_run)
 
 
 @main.command("doctor")

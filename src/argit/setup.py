@@ -16,6 +16,7 @@ import click
 from . import path_conventions
 from .errors import ArgitError
 from .gpgwrap import GpgWrap
+from .hashing import canonical_hash
 from .shared import (
     IT_BACKUP_FPR,
     IT_BACKUP_UID,
@@ -82,6 +83,125 @@ def _all_bundled_manifest_paths() -> list[Path]:
 def _bundled_it_key_path() -> Path:
     res = resources.files("argit.keys").joinpath("it-backup-pubkey.asc")
     return Path(str(res))
+
+
+def _load_hash_catalog() -> dict[str, str]:
+    """Load the shipped hash catalog.
+
+    Returns `{filename: hex_digest}`. Empty dict if the catalog is missing
+    (pre-Track-A argit installs, build-time glitches) — callers treat this
+    as "no catalog" and degrade gracefully.
+    """
+    pkg = resources.files("argit.manifest_templates")
+    candidate = pkg.joinpath("hashes.json")
+    try:
+        body = json.loads(Path(str(candidate)).read_text(encoding="utf-8"))
+    except (FileNotFoundError, AttributeError):
+        return {}
+    except json.JSONDecodeError as exc:
+        raise ArgitError(
+            f"hash catalog hashes.json is malformed: {exc.msg} (line {exc.lineno})",
+            "reinstall argit; the shipped catalog is required for drift detection",
+        ) from exc
+    if not isinstance(body, dict):
+        raise ArgitError(
+            "hash catalog hashes.json must be a JSON object",
+            "reinstall argit; the shipped catalog is corrupt",
+        )
+    return {str(k): str(v) for k, v in body.items()}
+
+
+def _classify_drift(repo_manifest_path: Path) -> tuple[str, int | None]:
+    """Hash-only drift classifier — does NOT invoke load_manifest.
+
+    Decoupling from the parser is load-bearing (F2): a pre-spec-02 or
+    otherwise grammar-incompatible manifest in the repo must still
+    classify so Track A's upgrade path is reachable.
+
+    Returns:
+      ("clean", None)             — hash matches the current bundled manifest
+      ("stale_bundle", N)         — hash matches catalog entry for revision N,
+                                     where N is older than the current bundled
+      ("operator_modified", None) — hash matches nothing in the catalog
+    """
+    from .manifest import parse_filename  # local import — avoids cycle
+
+    digest = canonical_hash(repo_manifest_path)
+    catalog = _load_hash_catalog()
+    if not catalog:
+        # No catalog shipped → every manifest classifies as operator-modified
+        # (the safest default — leave untouched).
+        return ("operator_modified", None)
+
+    # Build reverse lookup: hex_digest → (filename, revision)
+    by_digest: dict[str, tuple[str, int]] = {}
+    for name, h in catalog.items():
+        try:
+            _, _, rev = parse_filename(name)
+        except ArgitError:
+            continue  # catalog entry with non-conforming name — skip
+        by_digest[h] = (name, rev)
+
+    match = by_digest.get(digest)
+    if match is None:
+        return ("operator_modified", None)
+
+    # Is this the current bundled? Compare against the highest-revision
+    # catalog entry for the same agent_type/agent_version.
+    match_name, match_rev = match
+    try:
+        match_type, match_ver, _ = parse_filename(match_name)
+    except ArgitError:
+        return ("operator_modified", None)
+
+    same_family_revs = []
+    for name in catalog:
+        try:
+            t, v, r = parse_filename(name)
+        except ArgitError:
+            continue
+        if t == match_type and v == match_ver:
+            same_family_revs.append(r)
+    latest = max(same_family_revs) if same_family_revs else match_rev
+
+    if match_rev == latest:
+        return ("clean", None)
+    return ("stale_bundle", match_rev)
+
+
+def _cleanup_stale_upgrade_files(manifest_dir: Path, yes: bool, dry_run: bool) -> None:
+    """Remove or warn about stray `*.manifest.json.new` files from a crashed
+    upgrade.
+
+    Zero-byte: genuine interrupted write signature → always remove.
+    Non-zero: could be an operator backup copy → requires --yes (F15).
+    """
+    if not manifest_dir.is_dir():
+        return
+    for new_file in sorted(manifest_dir.glob("*.manifest.json.new")):
+        try:
+            size = new_file.stat().st_size
+        except OSError:
+            continue
+        if size == 0:
+            if dry_run:
+                _emit(True, f"remove stale upgrade artifact: {new_file.name}")
+            else:
+                new_file.unlink()
+                _already(f"removed stale upgrade artifact: {new_file.name}")
+        else:
+            if yes:
+                if dry_run:
+                    _emit(True, f"remove stale upgrade artifact: {new_file.name} (--yes, non-zero content)")
+                else:
+                    new_file.unlink()
+                    _already(f"removed stale upgrade artifact: {new_file.name}")
+            else:
+                click.echo(
+                    f"! stray .new file may be an interrupted write or an operator "
+                    f"backup: {new_file.name} — leaving in place (pass --yes to auto-remove)",
+                    err=True,
+                )
 
 
 def _ensure_manifest(repo_root: Path, dry_run: bool) -> bool:
@@ -279,7 +399,101 @@ def _print_pass_init_hint(repo_root: Path, agent_fpr: str, dry_run: bool) -> Non
     click.echo(line)
 
 
-def run_setup(repo_root: Path, *, yes: bool, agent_key: str | None, dry_run: bool) -> None:
+def _handle_drift(
+    repo_root: Path, *, yes: bool, no_upgrade_manifest: bool, dry_run: bool,
+) -> None:
+    """Classify and (conditionally) act on manifest drift.
+
+    Runs BEFORE any load_manifest call (F2): a pre-spec-02 or otherwise
+    grammar-incompatible manifest must still be reachable by the upgrade
+    path — the classifier is hash-only.
+    """
+    manifest_dir = repo_root / ".argit" / "manifest"
+    _cleanup_stale_upgrade_files(manifest_dir, yes=yes, dry_run=dry_run)
+
+    if not manifest_dir.is_dir():
+        return
+    existing = sorted(manifest_dir.glob("*.manifest.json"))
+    if not existing:
+        return
+    # Pre-Track-A multi-manifest state is a first-touch error at
+    # find_manifest_file; respect it here by classifying only the first.
+    repo_manifest_path = existing[0]
+
+    drift, matched_rev = _classify_drift(repo_manifest_path)
+    bundled = _bundled_manifest_path()
+
+    if drift == "clean":
+        _already(f"manifest drift: clean ({repo_manifest_path.name})")
+        return
+
+    if drift == "operator_modified":
+        click.echo(
+            f"= manifest drift: operator-modified ({repo_manifest_path.name}). "
+            f"Leaving alone. If you intended operator extensions, move them to "
+            f"`.manifest.local.json` — see MANIFEST.md §Overlay."
+        )
+        return
+
+    # stale_bundle
+    latest_rev = int(bundled.name.rsplit("-", 1)[-1].split(".", 1)[0])
+    if no_upgrade_manifest:
+        if dry_run:
+            _emit(True, f"drift: stale bundle (rev {matched_rev} → {latest_rev}); "
+                        f"--no-upgrade-manifest set, would skip upgrade")
+        else:
+            click.echo(
+                f"= manifest drift: stale bundle (rev {matched_rev} → {latest_rev} available); "
+                f"--no-upgrade-manifest set, skipping upgrade."
+            )
+        return
+
+    if dry_run:
+        if yes:
+            _emit(True, f"upgrade rev {matched_rev} → {latest_rev} (--yes would auto-accept)")
+        else:
+            _emit(True, f"drift: stale bundle (rev {matched_rev} → {latest_rev}); "
+                        f"would prompt for upgrade (pass --yes to auto-accept in a non-dry-run)")
+        return
+
+    if not yes:
+        click.echo(
+            f"Your {repo_manifest_path.relative_to(repo_root)} matches an older bundled "
+            f"revision (rev {matched_rev}). The current bundled revision is {latest_rev}. "
+            f"Upgrade? [Y/n] ",
+            nl=False,
+        )
+        try:
+            answer = click.get_text_stream("stdin").readline().strip().lower()
+        except KeyboardInterrupt:
+            raise click.exceptions.Abort()
+        if answer not in ("", "y", "yes"):
+            click.echo(
+                f"= leaving {repo_manifest_path.name} at rev {matched_rev}. "
+                f"Run with --no-upgrade-manifest to suppress this prompt."
+            )
+            return
+
+    # Atomic upgrade inside the in-progress marker.
+    new_path = repo_manifest_path.with_suffix(".json.new")
+    target = manifest_dir / bundled.name
+    with in_progress_marker(repo_root):
+        # Write the new bundled body to <file>.new, then atomically replace.
+        new_path.write_bytes(bundled.read_bytes())
+        # If the bundled filename differs from the repo's (revision bump),
+        # remove the old file after writing the new — os.replace is the
+        # atomic swap for same-name; for rename we do write-then-unlink-old.
+        import os
+        if target.name == repo_manifest_path.name:
+            os.replace(new_path, target)
+        else:
+            os.replace(new_path, target)
+            repo_manifest_path.unlink(missing_ok=True)
+    _emit(False, f"upgraded manifest: rev {matched_rev} → {latest_rev} ({target.name})")
+
+
+def run_setup(repo_root: Path, *, yes: bool, agent_key: str | None,
+              no_upgrade_manifest: bool = False, dry_run: bool) -> None:
     require_python()
     require_supported_platform()
     for b in ("gpg", "git"):
@@ -290,6 +504,10 @@ def run_setup(repo_root: Path, *, yes: bool, agent_key: str | None, dry_run: boo
     # .gitignore appends don't race. Lock acquisition itself is harmless in
     # dry-run too.
     with acquire_lock(repo_root):
+        # Drift classification + upgrade MUST run before any load_manifest
+        # call (F2). The classifier is hash-only and reachable even when
+        # the existing manifest has an unparseable grammar.
+        _handle_drift(repo_root, yes=yes, no_upgrade_manifest=no_upgrade_manifest, dry_run=dry_run)
         _ensure_manifest(repo_root, dry_run)
         _ensure_gitignore(repo_root, dry_run)
         agent_type = _read_agent_type(_bundled_manifest_path())
