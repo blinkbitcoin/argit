@@ -43,7 +43,7 @@ def _setup_repo(repo: Path, fpr: str, env: dict[str, str]) -> None:
     mdir = repo / ".argit" / "manifest"
     mdir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(BUNDLED, mdir / BUNDLED.name)
-    (repo / ".gitattributes").write_text("openclaw/media/** filter=lfs diff=lfs merge=lfs -text\n")
+    (repo / ".gitattributes").write_text("openclaw/blob/** filter=lfs diff=lfs merge=lfs -text\n")
     (repo / ".gitignore").write_text(".argit/in-progress\n.argit/lock\n")
     secrets = repo / "secrets"
     secrets.mkdir(exist_ok=True)

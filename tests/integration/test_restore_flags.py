@@ -46,7 +46,7 @@ def _setup_repo_and_backup(tmp_path: Path, gnupg_home: Path, fpr: str) -> tuple[
 
     mdir = repo / ".argit" / "manifest"; mdir.mkdir(parents=True)
     shutil.copy2(BUNDLED, mdir / BUNDLED.name)
-    (repo / ".gitattributes").write_text("openclaw/media/** filter=lfs diff=lfs merge=lfs -text\n")
+    (repo / ".gitattributes").write_text("openclaw/blob/** filter=lfs diff=lfs merge=lfs -text\n")
     (repo / ".gitignore").write_text(".argit/in-progress\n.argit/lock\n")
     secrets = repo / "secrets"; secrets.mkdir()
     pass_env = {**env, "PASSWORD_STORE_DIR": str(secrets)}

@@ -16,9 +16,10 @@ from typing import Callable
 
 import click
 
+from . import path_conventions
 from .errors import ArgitError
 from .gpgwrap import GpgWrap
-from .manifest import find_manifest_file, load_manifest
+from .manifest import Manifest, find_manifest_file, load_manifest
 from .shared import (
     IT_BACKUP_FPR,
     REQUIRED_PYTHON,
@@ -61,12 +62,18 @@ def _check_manifest(repo_root: Path) -> CheckFn:
     return _fn
 
 
-def _check_gitattributes(repo_root: Path) -> CheckFn:
+def _check_gitattributes(repo_root: Path, manifest: Manifest | None) -> CheckFn:
     def _fn() -> None:
-        ga = repo_root / ".gitattributes"
-        if not ga.is_file() or "openclaw/media/**" not in ga.read_text(encoding="utf-8"):
+        if manifest is None:
             raise ArgitError(
-                ".gitattributes missing the LFS line for openclaw/media/**",
+                ".gitattributes LFS check needs a loadable manifest",
+                "run `argit setup` to install a manifest first",
+            )
+        pattern = path_conventions.LFS_PATTERN_TEMPLATE.format(agent_type=manifest.agent_type)
+        ga = repo_root / ".gitattributes"
+        if not ga.is_file() or pattern not in ga.read_text(encoding="utf-8"):
+            raise ArgitError(
+                f".gitattributes missing the LFS line for {pattern}",
                 "run `argit setup`",
             )
     return _fn
@@ -162,13 +169,22 @@ def run_doctor(repo_root: Path) -> int:
     gpg = GpgWrap()
     results: list[tuple[str, bool, str | None]] = []
 
+    # Load manifest once — used by the gitattributes check (needs agent_type)
+    # and the lifecycle-preview at the bottom. Manifest-missing surfaces as
+    # its own failed check ("manifest in .argit/manifest/"); the gitattributes
+    # check then cleanly reports its own failure via the None branch.
+    try:
+        manifest = load_manifest(repo_root)
+    except ArgitError:
+        manifest = None
+
     results.append(_check(f"python ≥ {REQUIRED_PYTHON[0]}.{REQUIRED_PYTHON[1]}", _check_python))
     for b in ("gpg", "pass", "sqlite3", "git", "git-lfs"):
         results.append(_check(f"{b} on PATH", lambda b=b: require_binary(b)))
     results.append(_check("git-lfs filter configured", check_lfs_filter_configured))
     results.append(_check("cwd is git repo", _check_git_repo(repo_root)))
     results.append(_check("manifest in .argit/manifest/", _check_manifest(repo_root)))
-    results.append(_check(".gitattributes has LFS line", _check_gitattributes(repo_root)))
+    results.append(_check(".gitattributes has LFS line", _check_gitattributes(repo_root, manifest)))
     results.append(_check("IT backup key imported", _check_it_key(gpg)))
     results.append(_check("personal GPG key present", _check_personal_key(gpg)))
     results.append(_check("secrets/.gpg-id present + non-empty", _check_gpg_id(repo_root)))
@@ -184,11 +200,9 @@ def run_doctor(repo_root: Path) -> int:
             if remediation:
                 click.echo(f"  → {remediation}")
 
-    # Lifecycle preview (informational only).
-    try:
-        m = load_manifest(repo_root)
-    except ArgitError:
-        m = None
+    # Lifecycle preview (informational only). Reuses the manifest loaded at
+    # the top of run_doctor so we don't parse it twice.
+    m = manifest
     if m is not None and m.lifecycle is not None:
         click.echo("\nLifecycle commands argit would execute on `argit restore`:")
         for label, cmd in (
