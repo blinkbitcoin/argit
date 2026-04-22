@@ -94,8 +94,15 @@ def _load_hash_catalog() -> dict[str, str]:
     (pre-Track-A argit installs, build-time glitches) — callers treat this
     as "no catalog" and degrade gracefully.
     """
-    pkg = resources.files("argit.manifest_templates")
-    candidate = Path(str(pkg.joinpath("hashes.json")))
+    # Address via the `argit` package with a path suffix rather than via
+    # `argit.manifest_templates` — the latter works in source trees but is
+    # not guaranteed resolvable after `pip install` when manifest_templates/
+    # has no __init__.py (not an importable subpackage under setuptools'
+    # packages.find). Joining from the known-importable `argit` package is
+    # stable across source + installed wheels. (The three pre-existing
+    # `resources.files("argit.manifest_templates")` sites in this file
+    # predate Track A and are out of scope for this PR — worth a follow-up.)
+    candidate = Path(str(resources.files("argit").joinpath("manifest_templates/hashes.json")))
     if not candidate.is_file():
         return {}
     try:
@@ -418,6 +425,9 @@ def _handle_drift(
         return
     # Pre-Track-A multi-manifest state is a first-touch error at
     # find_manifest_file; respect it here by classifying only the first.
+    # Whether _handle_drift should proactively error on multi-manifest
+    # (per Copilot's suggestion in PR #5) is a spec question — filed as
+    # a follow-up issue.
     repo_manifest_path = existing[0]
 
     drift, matched_rev = _classify_drift(repo_manifest_path)
@@ -483,19 +493,29 @@ def _handle_drift(
             )
             return
 
-    # Atomic upgrade inside the in-progress marker.
-    new_path = repo_manifest_path.with_suffix(".json.new")
+    # Atomic upgrade inside the in-progress marker. Crash-safety invariant:
+    # at most one *.manifest.json exists at any point.
+    #
+    # Sequence (when target.name == repo_manifest_path.name, the common
+    # same-revision-rewrite case):
+    #   1. Write new bytes to `<name>.new`    (crash → .new cleaned at next setup)
+    #   2. os.replace(.new, name)              (atomic)
+    #
+    # Sequence (when target.name differs, rev-bump case):
+    #   1. Write new bytes to `<new-name>.new` (crash → .new cleaned)
+    #   2. Unlink old `<old-name>`            (crash → zero manifests, user reruns)
+    #   3. os.replace(<new-name>.new, <new-name>)  (atomic, no two-manifest window)
+    #
+    # The "unlink old BEFORE replace" order eliminates the prior race where
+    # a crash between replace + unlink-old left both files on disk,
+    # triggering find_manifest_file's multi-manifest error downstream.
+    new_path = manifest_dir / (bundled.name + ".new")
     target = manifest_dir / bundled.name
     with in_progress_marker(repo_root):
-        # Write the new bundled body to <file>.new, then atomically replace.
-        # When the bundled filename differs from the repo's (revision bump),
-        # the old file must be unlinked after — otherwise find_manifest_file
-        # sees two manifests. The acquire_lock + in_progress_marker wrapping
-        # run_setup keeps this window safe from concurrent argit processes.
         new_path.write_bytes(bundled.read_bytes())
-        os.replace(new_path, target)
         if target.name != repo_manifest_path.name:
             repo_manifest_path.unlink(missing_ok=True)
+        os.replace(new_path, target)
     _emit(False, f"upgraded manifest: rev {matched_rev} → {latest_rev} ({target.name})")
 
 

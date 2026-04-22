@@ -50,9 +50,8 @@ def test_ac_a1_clean_matches_current_bundled(tmp_path):
     rev1 = _make_rev(tmp_path, 1)
     rev2 = _make_rev(tmp_path, 2)
     catalog = _catalog_for(rev1, rev2)
-    # Repo has the latest (rev2) → clean.
-    repo_manifest = _write(tmp_path / "repo-2.manifest.json", json.loads(rev2.read_text()))
-    # rename to match expected filename convention so parse_filename accepts.
+    # Repo has the latest (rev2) → clean. Stage at expected filename so
+    # parse_filename accepts it.
     target = tmp_path / "repo" / "openclaw-2026.4.14-2.manifest.json"
     target.parent.mkdir()
     target.write_bytes(rev2.read_bytes())

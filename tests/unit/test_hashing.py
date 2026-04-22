@@ -79,8 +79,8 @@ def test_a22_nonascii_content_deterministic(tmp_path):
     # We re-derive the canonical form manually and confirm.
     body = json.loads(a.read_text(encoding="utf-8-sig"))
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    assert "\\u20ac" in canonical  # € → €
-    assert "\\ud83c\\udf89" in canonical  # 🎉 → surrogate pair
+    assert "\\u20ac" in canonical  # € → € (ensure_ascii=True escapes)
+    assert "\\ud83c\\udf89" in canonical  # 🎉 → surrogate-pair 🎉
 
 
 def test_a22_nonascii_different_files_different_hash(tmp_path):
