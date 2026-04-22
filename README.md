@@ -7,17 +7,69 @@ commit as plaintext. MVP targets **OpenClaw** only.
 
 ## Quick Install
 
+The argit repo is private. Installation uses a bundled read-only deploy key
+to clone over SSH. Copy-paste this block once per host (it sets up the SSH
+key + Host alias and runs the install):
+
 ```sh
-curl -fsSL https://raw.githubusercontent.com/blinkbitcoin/argit/main/install.sh | bash
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+touch ~/.ssh/config && chmod 600 ~/.ssh/config
+
+cat > ~/.ssh/argit-deploy <<'EOF'
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACCbHQz3D+jQgiaKYDWXdsf/LGvw0GJWm3y6h3snQNVNzwAAAJjbdI4O23SO
+DgAAAAtzc2gtZWQyNTUxOQAAACCbHQz3D+jQgiaKYDWXdsf/LGvw0GJWm3y6h3snQNVNzw
+AAAEAiLVilcVJz2bSoI5QY4qH5W4ECMGmNWl4jGeBLuwhO4JsdDPcP6NCCJopgNZd2x/8s
+a/DQYlabfLqHeydA1U3PAAAAFWFyZ2l0LWRlcGxveS1yZWFkb25seQ==
+-----END OPENSSH PRIVATE KEY-----
+EOF
+chmod 600 ~/.ssh/argit-deploy
+
+if ! grep -q "^Host github-argit$" ~/.ssh/config 2>/dev/null; then
+  cat >> ~/.ssh/config <<EOF
+
+Host github-argit
+  Hostname github.com
+  User git
+  IdentityFile ~/.ssh/argit-deploy
+  IdentitiesOnly yes
+EOF
+fi
+
+# uv (preferred) or pipx — install whichever you have:
+command -v uv >/dev/null 2>&1 \
+  && uv tool install git+ssh://git@github-argit/blinkbitcoin/argit.git@main \
+  || pipx install git+ssh://git@github-argit/blinkbitcoin/argit.git@main
+
+argit --version
 ```
 
-The installer uses `uv tool install` (preferred) or `pipx install` to install the
-`argit` command. Neither on PATH → it prints the `uv` install one-liner and exits.
+Pin a specific release by replacing `@main` with `@v1.2.0` (or any tag).
 
-Pin a release:
+If `argit` isn't on PATH after install, run `pipx ensurepath` and `source ~/.bashrc` (or `~/.zshrc`).
+
+### About the bundled deploy key
+
+The key above has **read-only** access scoped to `blinkbitcoin/argit` (no write,
+no other repos, no user). Anyone with the README contents can clone argit;
+that's the trade-off chosen for `curl|paste|bash` UX over a private repo.
+GitHub permits this pattern for read-only deploy keys. If the key needs
+rotation, ship a new argit release with an updated README and revoke the old
+deploy key on the repo.
+
+### Alternative install methods
+
+If you have your own SSH key registered with GitHub and read access to the repo:
 
 ```sh
-ARGIT_TAG=v1.0.0 curl -fsSL https://raw.githubusercontent.com/blinkbitcoin/argit/v1.0.0/install.sh | ARGIT_TAG=v1.0.0 bash
+uv tool install git+ssh://git@github.com/blinkbitcoin/argit.git@main
+```
+
+If you have `gh` authenticated:
+
+```sh
+gh repo clone blinkbitcoin/argit /tmp/argit && pipx install /tmp/argit
 ```
 
 ## Six-Step Bootstrap
