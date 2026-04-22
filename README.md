@@ -5,11 +5,12 @@ state into a git repository. Secrets live in a repo-local `pass` store (dual-rec
 encrypted with the operator's GPG key + an IT backup key); sanitized config and state
 commit as plaintext. MVP targets **OpenClaw** only.
 
-## Quick Install
+## Quick Install / Upgrade
 
 The argit repo is private. Installation uses a bundled read-only deploy key
-to clone over SSH. Copy-paste this block once per host (it sets up the SSH
-key + Host alias and runs the install):
+to clone over SSH. Copy-paste this block (it sets up the SSH key + Host
+alias once, then installs/upgrades to whatever ref is at the end —
+**re-run the same block to upgrade**):
 
 ```sh
 mkdir -p ~/.ssh && chmod 700 ~/.ssh
@@ -37,15 +38,23 @@ Host github-argit
 EOF
 fi
 
-# uv (preferred) or pipx — install whichever you have:
-command -v uv >/dev/null 2>&1 \
-  && uv tool install git+ssh://git@github-argit/blinkbitcoin/argit.git@main \
-  || pipx install git+ssh://git@github-argit/blinkbitcoin/argit.git@main
-
-argit --version
+argit_install() {
+  local URL="git+ssh://git@github-argit/blinkbitcoin/argit.git@${1:-main}"
+  if command -v uv >/dev/null 2>&1; then
+    uv tool install --force "$URL"
+  elif command -v pipx >/dev/null 2>&1; then
+    pipx install --force "$URL"
+  else
+    echo "neither uv nor pipx found — install one first" >&2; return 1
+  fi
+  argit --version
+}; argit_install main
 ```
 
-Pin a specific release by replacing `@main` with `@v1.2.0` (or any tag).
+The trailing word — `main` — is the git ref. To install or upgrade to a
+different ref, hit **Ctrl-E** to jump to end-of-line, replace `main` with
+`v1.2.0` (or any tag/branch/SHA), and hit Enter. Re-running with the same
+ref reinstalls (use this to pick up new commits on `main`).
 
 If `argit` isn't on PATH after install, run `pipx ensurepath` and `source ~/.bashrc` (or `~/.zshrc`).
 
