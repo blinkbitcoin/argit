@@ -38,12 +38,20 @@ Host github-argit
 EOF
 fi
 
+# Pin GitHub's ED25519 host key (idempotent). Avoids the non-interactive
+# "Host key verification failed" error on fresh hosts where pipx/uv can't
+# accept the key on first connection. Key fetched from api.github.com/meta.
+touch ~/.ssh/known_hosts && chmod 600 ~/.ssh/known_hosts
+if ! grep -q "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" ~/.ssh/known_hosts 2>/dev/null; then
+  echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" >> ~/.ssh/known_hosts
+fi
+
 argit_install() {
   local URL="git+ssh://git@github-argit/blinkbitcoin/argit.git@${1:-main}"
   if command -v uv >/dev/null 2>&1; then
-    uv tool install --force "$URL"
+    uv tool install --force "$URL" || return $?
   elif command -v pipx >/dev/null 2>&1; then
-    pipx install --force "$URL"
+    pipx install --force "$URL" || return $?
   else
     echo "neither uv nor pipx found — install one first" >&2; return 1
   fi
