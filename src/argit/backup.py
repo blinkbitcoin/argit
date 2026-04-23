@@ -158,9 +158,16 @@ def _version_check(manifest: Manifest) -> None:
     if not raw:
         _warn("openclaw --version produced no output; skipping comparison")
         return
-    token = raw[0].lstrip("v")
-    if not _version_parseable(token):
-        _warn(f"openclaw --version returned '{token}' (unparseable); skipping comparison")
+    # OpenClaw prints `OpenClaw <ver> (<commit>)`; older/alternate builds
+    # print bare `<ver>` or `v<ver>`. Scan for the first parseable token
+    # rather than assuming position 0 — position 0 is the program name in
+    # the current format.
+    token = next(
+        (t for t in (candidate.lstrip("v") for candidate in raw) if _version_parseable(t)),
+        None,
+    )
+    if token is None:
+        _warn(f"openclaw --version returned '{' '.join(raw)}' (no parseable version token); skipping comparison")
         return
     cmp = _version_cmp(token, manifest.agent_version)
     if cmp > 0:
