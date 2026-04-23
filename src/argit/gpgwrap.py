@@ -1,8 +1,9 @@
 """GPG subprocess wrapper.
 
-Parses `gpg --with-colons` output per the DETAILS file format (pub/uid/fpr
-records). All operations honor a 30s timeout; FileNotFoundError is mapped to
-the install-line first-touch error.
+Parses `gpg --with-colons` output per the DETAILS file format (pub/sec/uid/fpr
+records — `pub` and `sec` share the field layout, differing only in which
+keyring they come from). All operations honor a 30s timeout; FileNotFoundError
+is mapped to the install-line first-touch error.
 """
 
 from __future__ import annotations
@@ -50,7 +51,17 @@ class GpgWrap:
             ) from exc
 
     def list_keys(self) -> list[GpgKey]:
+        """Public keyring. Used by `is_key_imported` to verify IT-backup-key
+        presence. Do NOT use to decide which keys the operator controls — a
+        public-only import would misclassify; use `list_secret_keys` for that."""
         cp = self._run(["--with-colons", "--list-keys"])
+        return _parse_colons(cp.stdout)
+
+    def list_secret_keys(self) -> list[GpgKey]:
+        """Private keyring — keys whose secret half is present, i.e. keys the
+        operator actually controls. This is the right filter for any
+        "personal key" decision."""
+        cp = self._run(["--with-colons", "--list-secret-keys"])
         return _parse_colons(cp.stdout)
 
     def is_key_imported(self, fpr: str) -> bool:
@@ -78,16 +89,21 @@ class GpgWrap:
         self._run(["--import-ownertrust"], stdin=line)
 
     def list_personal_keys(self, exclude_fpr: str) -> list[GpgKey]:
+        """Keys the operator controls (secret half present), minus the
+        IT backup key. Public-only imports are excluded by construction —
+        see `list_secret_keys` docstring."""
         target = exclude_fpr.replace(" ", "").upper()
-        return [k for k in self.list_keys() if k.fpr.upper() != target]
+        return [k for k in self.list_secret_keys() if k.fpr.upper() != target]
 
 
 def _parse_colons(text: str) -> list[GpgKey]:
-    """Parse `gpg --with-colons --list-keys` output.
+    """Parse `gpg --with-colons --list-keys` / `--list-secret-keys` output.
 
     Records are line-oriented; fields separated by `:`. Relevant types:
-    `pub` (public key) — capability in field 12 — followed by `fpr` (full
-    fingerprint in field 10) and one or more `uid` records (uid in field 10).
+    `pub` (public primary key) and `sec` (secret primary key) — same field
+    layout, different keyring. Each is followed by `fpr` (full fingerprint
+    in field 10) and one or more `uid` records (uid in field 10). Capability
+    is field 12 on the primary-key record.
     """
     keys: list[GpgKey] = []
     current: GpgKey | None = None
@@ -96,7 +112,7 @@ def _parse_colons(text: str) -> list[GpgKey]:
             continue
         fields = line.split(":")
         rectype = fields[0]
-        if rectype == "pub":
+        if rectype in ("pub", "sec"):
             current = GpgKey(fpr="", capability=fields[11] if len(fields) > 11 else "")
             keys.append(current)
         elif rectype == "fpr" and current is not None and not current.fpr:
