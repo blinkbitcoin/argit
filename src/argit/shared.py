@@ -33,6 +33,9 @@ def matches_exclude(rel: Path, patterns: list[str]) -> bool:
     - `*` matches across path separators (so `*.sqlite-wal` matches
       `tasks/runs.sqlite-wal`). This deviates from POSIX `fnmatch` but matches
       operator intent for manifest-author-friendly patterns.
+    - The two above compose: `agents/*/sessions/` matches
+      `agents/main/sessions/foo.json` AND `agents/erbot/sessions/bar.jsonl`.
+      Same for `memory/lancedb.bak*/` et al.
 
     Hoisted from backup.py (pre-Track-B) so expand_globbed_item in manifest.py
     can share the logic without creating a backup.py → manifest.py cycle.
@@ -44,6 +47,20 @@ def matches_exclude(rel: Path, patterns: list[str]) -> bool:
         if fnmatch.fnmatch(s, pat):
             return True
         if pat.endswith("/") and s.startswith(pat):
+            return True
+        # Glob + directory-prefix composition: the three checks above handle
+        # (literal-dir-prefix) OR (glob-exact-match) but neither catches a
+        # pattern like `agents/*/sessions/` against a deeper path like
+        # `agents/main/sessions/foo.json` — fnmatch requires the path to also
+        # end in `/`, and literal startswith can't expand the `*`. Treat a
+        # trailing-slash pattern as a dir-prefix that allows anything below.
+        if pat.endswith("/") and fnmatch.fnmatch(s, pat + "*"):
+            return True
+        # Also: Path normalizes `foo/` → `foo`, so a caller asking whether
+        # the directory itself is excluded passes no trailing slash. Match
+        # the pattern minus its trailing `/` so the directory entry itself
+        # is covered too.
+        if pat.endswith("/") and fnmatch.fnmatch(s, pat.rstrip("/")):
             return True
     return False
 
