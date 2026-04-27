@@ -33,6 +33,9 @@ def matches_exclude(rel: Path, patterns: list[str]) -> bool:
     - `*` matches across path separators (so `*.sqlite-wal` matches
       `tasks/runs.sqlite-wal`). This deviates from POSIX `fnmatch` but matches
       operator intent for manifest-author-friendly patterns.
+    - The two above compose: `agents/*/sessions/` matches
+      `agents/main/sessions/foo.json` AND `agents/erbot/sessions/bar.jsonl`.
+      Same for `memory/lancedb.bak*/` et al.
 
     Hoisted from backup.py (pre-Track-B) so expand_globbed_item in manifest.py
     can share the logic without creating a backup.py → manifest.py cycle.
@@ -44,6 +47,20 @@ def matches_exclude(rel: Path, patterns: list[str]) -> bool:
         if fnmatch.fnmatch(s, pat):
             return True
         if pat.endswith("/") and s.startswith(pat):
+            return True
+        # Glob + directory-prefix composition: the three checks above handle
+        # (literal-dir-prefix) OR (glob-exact-match) but neither catches a
+        # pattern like `agents/*/sessions/` against a deeper path like
+        # `agents/main/sessions/foo.json` — fnmatch requires the path to also
+        # end in `/`, and literal startswith can't expand the `*`. Treat a
+        # trailing-slash pattern as a dir-prefix that allows anything below.
+        if pat.endswith("/") and fnmatch.fnmatch(s, pat + "*"):
+            return True
+        # Also: Path normalizes `foo/` → `foo`, so a caller asking whether
+        # the directory itself is excluded passes no trailing slash. Match
+        # the pattern minus its trailing `/` so the directory entry itself
+        # is covered too.
+        if pat.endswith("/") and fnmatch.fnmatch(s, pat.rstrip("/")):
             return True
     return False
 
@@ -194,15 +211,46 @@ def in_progress_path(repo_root: Path) -> Path:
     return repo_root / IN_PROGRESS
 
 
-def check_no_partial_state(repo_root: Path, cmd: str) -> None:
-    p = in_progress_path(repo_root)
-    if p.exists():
-        err = ArgitError(
-            f"a previous {cmd} interrupted — working tree may be partially updated",
-            f"inspect with `git status`, delete {p} when satisfied, then retry",
+def _working_tree_is_clean(repo_root: Path) -> bool:
+    """`git status --porcelain` empty → no staged, unstaged, or untracked
+    changes. Used to decide whether an interrupted command left any state
+    behind; if not, the marker is safe to auto-clear."""
+    try:
+        cp = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(repo_root),
+            capture_output=True, text=True, timeout=10, check=False,
         )
-        err.exit_code = EXIT_PARTIAL_STATE  # type: ignore[attr-defined]
-        raise err
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False  # cannot verify → keep the marker
+    if cp.returncode != 0:
+        return False
+    return cp.stdout.strip() == ""
+
+
+def check_no_partial_state(repo_root: Path, cmd: str) -> None:
+    """Block execution when a previous run was interrupted mid-mutation.
+
+    If the marker exists but the working tree is demonstrably clean (no
+    staged/unstaged/untracked changes), the previous run exited before
+    committing any state — typically an operator Ctrl-C during a hung
+    pinentry prompt. In that case, auto-clear the marker and continue.
+    When the tree is dirty, keep the hard error so the operator inspects
+    first.
+    """
+    p = in_progress_path(repo_root)
+    if not p.exists():
+        return
+    if _working_tree_is_clean(repo_root):
+        with contextlib.suppress(FileNotFoundError):
+            p.unlink()
+        return
+    err = ArgitError(
+        f"a previous {cmd} interrupted — working tree has uncommitted changes",
+        f"inspect with `git status`, delete {p} when satisfied, then retry",
+    )
+    err.exit_code = EXIT_PARTIAL_STATE  # type: ignore[attr-defined]
+    raise err
 
 
 @contextlib.contextmanager

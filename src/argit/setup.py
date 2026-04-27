@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 from importlib import resources
 from pathlib import Path
@@ -23,12 +24,15 @@ from .shared import (
     IT_BACKUP_FPR,
     IT_BACKUP_UID,
     acquire_lock,
+    check_lfs_filter_configured,
     in_progress_marker,
     require_binary,
     require_git_repo,
     require_python,
     require_supported_platform,
 )
+
+PASS_INIT_TIMEOUT_SEC = 30
 
 
 def _emit(dry_run: bool, action: str) -> None:
@@ -329,15 +333,24 @@ def _ensure_secrets_dir(repo_root: Path, dry_run: bool) -> None:
 
 
 def _import_it_key(gpg: GpgWrap, repo_root: Path, dry_run: bool, yes: bool) -> bool:
-    if gpg.is_key_imported(IT_BACKUP_FPR):
-        _already(f"IT backup key already imported (fpr {IT_BACKUP_FPR})")
-        return False
-    asc = _bundled_it_key_path()
+    """Import the bundled IT backup public key + set ownertrust to Full.
+
+    `set_ownertrust` runs UNCONDITIONALLY (idempotent — re-setting to the
+    same level is a no-op). If the key was imported via a previous argit
+    version that didn't set trust, or via a non-argit channel, the trust
+    level stays Unknown and GPG prompts "Use this key anyway? (y/N)" on
+    every encrypt — which hangs `pass insert` when there's no tty. Always
+    asserting the trust level fixes those hosts on next `argit setup`.
+    """
+    newly_imported = not gpg.is_key_imported(IT_BACKUP_FPR)
     if dry_run:
-        _emit(True, f"import IT backup key (fpr {IT_BACKUP_FPR}, uid '{IT_BACKUP_UID}')")
+        if newly_imported:
+            _emit(True, f"import IT backup key (fpr {IT_BACKUP_FPR}, uid '{IT_BACKUP_UID}')")
+        else:
+            _already(f"IT backup key already imported (fpr {IT_BACKUP_FPR})")
         _emit(True, f"set ownertrust Full (4) on {IT_BACKUP_FPR}")
-        return True
-    if not yes:
+        return newly_imported
+    if newly_imported and not yes:
         click.echo(
             f"Importing IT backup key (fpr {IT_BACKUP_FPR}, uid '{IT_BACKUP_UID}') "
             f"into your GPG keyring. Press Enter to continue, Ctrl-C to abort."
@@ -349,14 +362,21 @@ def _import_it_key(gpg: GpgWrap, repo_root: Path, dry_run: bool, yes: bool) -> b
     # Mutation outside the backup repo — guard with the in-progress marker so
     # an interrupted import surfaces on the next run.
     with in_progress_marker(repo_root):
-        gpg.import_key(asc)
+        if newly_imported:
+            asc = _bundled_it_key_path()
+            gpg.import_key(asc)
         # GPG ownertrust numerics: 4=Full, 5=Ultimate. The IT key is an
         # external vendor key — Full, not Ultimate (Ultimate is for keys the
         # operator controls). The tech-spec's "(5)" for Full inverts GPG's
         # actual convention; we honor the intent (Full, not Ultimate).
         gpg.set_ownertrust(IT_BACKUP_FPR, 4)
-    _emit(False, f"imported IT backup key + set ownertrust Full")
-    return True
+    if newly_imported:
+        _emit(False, f"imported IT backup key + set ownertrust Full")
+    else:
+        _already(
+            f"IT backup key already imported (fpr {IT_BACKUP_FPR}) — re-asserted ownertrust Full"
+        )
+    return newly_imported
 
 
 def _detect_agent_key(gpg: GpgWrap, agent_key: str | None) -> str:
@@ -390,20 +410,49 @@ def _detect_agent_key(gpg: GpgWrap, agent_key: str | None) -> str:
     return personal[0].fpr
 
 
-def _print_pass_init_hint(repo_root: Path, agent_fpr: str, dry_run: bool) -> None:
-    secrets_gpg_id = repo_root / "secrets" / ".gpg-id"
-    line = (
-        f"Run: cd secrets && PASSWORD_STORE_DIR=. pass init {agent_fpr} {IT_BACKUP_FPR}"
+def _run_pass_init(repo_root: Path, agent_fpr: str, dry_run: bool) -> None:
+    """Initialize the repo-local pass store with the agent + IT backup
+    recipients. Previously this was a copy-paste hint; argit now runs the
+    command directly, now that preflight guarantees `pass`, `gpg`, and
+    git identity are all usable.
+
+    Idempotent: if `secrets/.gpg-id` already lists the expected
+    recipients, return a no-op status line.
+    """
+    secrets_dir = repo_root / "secrets"
+    gpg_id = secrets_dir / ".gpg-id"
+    cmd_display = (
+        f"cd secrets && PASSWORD_STORE_DIR=. pass init {agent_fpr} {IT_BACKUP_FPR}"
     )
-    if secrets_gpg_id.is_file():
-        # Already initialized — re-print for reference so the operator can
-        # always recover the exact command.
-        _already(f"secrets/.gpg-id present; pass-init command (for reference): {line}")
+    if gpg_id.is_file():
+        _already(f"pass store already initialized ({gpg_id.relative_to(repo_root)})")
         return
     if dry_run:
-        _emit(True, f"print: {line}")
+        _emit(True, f"run: {cmd_display}")
         return
-    click.echo(line)
+    env = {**os.environ, "PASSWORD_STORE_DIR": "."}
+    try:
+        subprocess.run(
+            ["pass", "init", agent_fpr, IT_BACKUP_FPR],
+            cwd=str(secrets_dir),
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=PASS_INIT_TIMEOUT_SEC,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise ArgitError(
+            f"pass init failed (exit {exc.returncode}): "
+            f"{(exc.stderr or exc.stdout).strip()}",
+            f"run manually to see full output: {cmd_display}",
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ArgitError(
+            f"pass init timed out after {PASS_INIT_TIMEOUT_SEC}s",
+            f"run manually: {cmd_display}",
+        ) from exc
+    _emit(False, f"initialized pass store → {gpg_id.relative_to(repo_root)}")
 
 
 def _handle_drift(
@@ -519,13 +568,86 @@ def _handle_drift(
     _emit(False, f"upgraded manifest: rev {matched_rev} → {latest_rev} ({target.name})")
 
 
+def _git_config_has(key: str) -> bool:
+    """Return True when git config resolves `key` to a non-empty value at
+    any scope (system/global/local). False on missing binary or missing key.
+    """
+    try:
+        cp = subprocess.run(
+            ["git", "config", "--get", key],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    return cp.returncode == 0 and bool(cp.stdout.strip())
+
+
+def _collect_preflight_failures(repo_root: Path) -> list[tuple[str, str]]:
+    """Run every environment-prereq check and collect (problem, remediation)
+    pairs. Empty list means everything is ready.
+
+    Single-fail behavior (bail on first missing prereq) is actively
+    user-hostile: operator fixes one thing, reruns, hits the next missing
+    thing, repeats. Collecting all failures up-front lets the operator
+    install/configure everything in one pass.
+    """
+    problems: list[tuple[str, str]] = []
+
+    def _try(fn) -> None:
+        try:
+            fn()
+        except ArgitError as exc:
+            problems.append((exc.diagnosis, exc.remediation))
+
+    _try(require_python)
+    _try(require_supported_platform)
+
+    # Full binary set — setup previously only required gpg + git, which left
+    # pass / sqlite3 / git-lfs failures for first-backup-time. Check them all
+    # here so a fresh host gets one complete list of things to install.
+    for binary in ("gpg", "git", "pass", "sqlite3", "git-lfs"):
+        _try(lambda b=binary: require_binary(b))
+
+    # git-lfs filter only makes sense to check if git-lfs itself is present;
+    # otherwise the filter check's remediation would be "run git lfs install"
+    # which conflicts with the "install git-lfs" line we already emitted.
+    if shutil.which("git-lfs"):
+        _try(check_lfs_filter_configured)
+
+    _try(lambda: require_git_repo(repo_root))
+
+    # git identity — pass init internally runs `git commit`, which aborts
+    # when user.email / user.name are unset ("Author identity unknown").
+    # Without this preflight check that failure surfaces mid-setup, after
+    # argit has already imported keys and created directories. Check
+    # up-front and surface alongside everything else missing.
+    for key in ("user.email", "user.name"):
+        if not _git_config_has(key):
+            example = (
+                "your.name@example.com" if key == "user.email" else "Your Name"
+            )
+            problems.append((
+                f"git config {key} is not set",
+                f'run: git config --global {key} "{example}"',
+            ))
+
+    return problems
+
+
+def _raise_on_preflight_failures(problems: list[tuple[str, str]]) -> None:
+    if not problems:
+        return
+    diagnosis_bullets = "\n  ".join(f"- {p}" for p, _ in problems)
+    remediation_bullets = "\n  ".join(f"- {r}" for _, r in problems)
+    raise ArgitError(
+        f"{len(problems)} preflight check(s) failed:\n  {diagnosis_bullets}",
+        f"address each:\n  {remediation_bullets}",
+    )
+
+
 def run_setup(repo_root: Path, *, yes: bool, agent_key: str | None,
               no_upgrade_manifest: bool = False, dry_run: bool) -> None:
-    require_python()
-    require_supported_platform()
-    for b in ("gpg", "git"):
-        require_binary(b)
-    require_git_repo(repo_root)
+    _raise_on_preflight_failures(_collect_preflight_failures(repo_root))
 
     # Serialize concurrent `argit setup` invocations so .gitattributes and
     # .gitignore appends don't race. Lock acquisition itself is harmless in
@@ -545,4 +667,4 @@ def run_setup(repo_root: Path, *, yes: bool, agent_key: str | None,
         _import_it_key(gpg, repo_root, dry_run, yes)
         agent_fpr = _detect_agent_key(gpg, agent_key)
         _emit(False, f"using agent GPG key: {agent_fpr}")
-        _print_pass_init_hint(repo_root, agent_fpr, dry_run)
+        _run_pass_init(repo_root, agent_fpr, dry_run)

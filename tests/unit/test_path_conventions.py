@@ -164,6 +164,15 @@ def test_validate_glob_source_accepts(source):
         ("foo*.json", "glob is only valid as a whole path component"),
         ("*.json", "glob is only valid as a whole path component"),
         ("foo-*-bar.json", "glob is only valid as a whole path component"),
+        # Real-world rev-7 investigation (April 2026): OpenClaw credentials/
+        # files follow `<service>[.-]<qualifier>.json` patterns with varying
+        # shape. The obvious filename-level globs are REJECTED by the
+        # current grammar — documenting here so future rev bumps don't
+        # re-attempt them without also relaxing validate_glob_source.
+        ("credentials/*.token.json", "glob is only valid as a whole path component"),
+        ("credentials/*-pairing.json", "glob is only valid as a whole path component"),
+        ("credentials/*-allowFrom.json", "glob is only valid as a whole path component"),
+        ("credentials/*-*-allowFrom.json", "glob is only valid as a whole path component"),
     ],
 )
 def test_validate_glob_source_rejects(source, fragment):

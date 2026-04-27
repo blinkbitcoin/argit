@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from click.testing import CliRunner
 
 from argit.cli import _cli
@@ -14,6 +15,15 @@ from argit.gpgwrap import GpgKey
 def _init_git(tmp_path: Path) -> Path:
     (tmp_path / ".git").mkdir()
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _stub_preflight():
+    """Preflight now inspects real binaries + git config on the host. These
+    tests exercise the post-preflight orchestration; stub preflight to
+    success so the tests don't depend on pass/sqlite3/git-lfs presence."""
+    with patch("argit.setup._collect_preflight_failures", return_value=[]):
+        yield
 
 
 @patch("argit.setup.GpgWrap")
@@ -34,7 +44,8 @@ def test_setup_dryrun_pristine(mock_gpg, tmp_path):
     assert "would: append to .gitattributes" in result.output
     assert "would: mkdir secrets/" in result.output
     assert "would: import IT backup key" in result.output
-    assert "would: print: Run: cd secrets" in result.output
+    assert "would: run: cd secrets" in result.output
+    assert "pass init" in result.output
 
 
 @patch("argit.setup.GpgWrap")
