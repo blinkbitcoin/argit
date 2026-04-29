@@ -139,6 +139,59 @@ def _check_chmod(path: Path, mode: str) -> None:
     path.chmod(int(mode, 8))
 
 
+def _warn_on_bundled_drift(repo_root: Path, manifest: Manifest) -> None:
+    """Hash-check the bundled manifest at backup time. Warn (don't block) when
+    the on-disk content doesn't match any catalog entry — i.e., the manifest
+    has been hand-edited or shipped from an unknown source.
+
+    Reuses setup's `_classify_drift` to keep a single source of truth on the
+    catalog format + canonical-hash comparison. Best-effort: silent on every
+    failure mode that isn't a clean `operator_modified` classification.
+    `clean` and `stale_bundle` are silent here — the latter is operator
+    not-yet-upgraded, surfaced by `argit setup`'s upgrade flow, not by
+    backup.
+    """
+    if not manifest.filename:
+        return
+    bundled_path = repo_root / ".argit" / "manifest" / manifest.filename
+    if not bundled_path.is_file():
+        return
+    # Lazy import: setup.py pulls a wider import graph (gpg, click prompts,
+    # etc.) that backup doesn't otherwise pay for. Lazy keeps backup's
+    # cold-import time tight.
+    try:
+        from .setup import _classify_drift, _load_hash_catalog
+    except ImportError:
+        return
+    # Explicit empty-catalog short-circuit. `_classify_drift` returns
+    # `operator_modified` when the catalog is empty/missing (pre-Track-A
+    # install, packaging glitch, missing wheel asset). Without this guard
+    # every backup would emit a noisy false-positive in those cases —
+    # exactly the "trains operators to ignore warnings" failure we want
+    # to avoid.
+    try:
+        catalog = _load_hash_catalog()
+    except ArgitError:
+        return  # malformed catalog — silent
+    if not catalog:
+        return  # no catalog shipped — silent
+    try:
+        kind, _rev = _classify_drift(bundled_path)
+    except ArgitError:
+        return  # unreadable bundled, invalid JSON — silent
+    if kind == "operator_modified":
+        # Wording is neutral: `operator_modified` covers hand-edits AND
+        # legitimate operator customization AND custom forks. Don't pretend
+        # we know it was the agent. Operator/agent reads the warning and
+        # decides whether the local edit was intentional.
+        _warn(
+            f"bundled manifest hash mismatch — {manifest.filename} doesn't "
+            f"match any known bundled revision. Run `argit setup` to inspect "
+            f"drift; if the local edit was intentional, move it into "
+            f"`<basename>.manifest.local.json` overlay."
+        )
+
+
 def _version_check(manifest: Manifest) -> None:
     """Probe `openclaw --version`, warn on mismatch (never fail)."""
     if shutil.which("openclaw") is None:
@@ -211,6 +264,7 @@ def run_backup(repo_root: Path, *, commit: bool, push: bool, strict: bool, dry_r
     source_root = manifest.expanded_source_root()
 
     _version_check(manifest)
+    _warn_on_bundled_drift(repo_root, manifest)
 
     secrets_dir = repo_root / "secrets"
     pass_wrap = PassWrap(secrets_dir)
