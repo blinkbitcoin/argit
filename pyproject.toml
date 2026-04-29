@@ -28,6 +28,8 @@ argit = [
                                      # *.manifest.json silently dropping
                                      # the drift catalog from the wheel.
   "keys/*.asc",
+  "templates/*.md",                  # review.py renders review-report.md
+                                     # via stdlib string.Template.
 ]
 
 [tool.ruff]

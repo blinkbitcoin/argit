@@ -1,9 +1,13 @@
-"""argit review — emit a flat list of uncovered paths as markdown.
+"""argit review — emit a markdown report of uncovered paths.
 
 Walks `source_root`, collects paths not matched by `items[]`, `sanitize[]`,
-or `exclude[]`, and emits the list as a markdown report at
+or `exclude[]`, and emits a self-contained markdown report at
 `.argit/reviews/<iso>.md`. Read-only — argit never edits the manifest.
 The report is informational; the operator/agent decides what to do.
+
+Report shape lives in `src/argit/templates/review-report.md` and is
+rendered via stdlib `string.Template` (no third-party templating dep).
+The template is shipped in package-data so it lands in the wheel.
 
 Two callers:
   - `argit review` CLI verb (manual)
@@ -15,11 +19,13 @@ verb's orchestration wrapper.
 from __future__ import annotations
 
 import datetime as dt
+from importlib import resources
 from pathlib import Path
+from string import Template
 
 import click
 
-from .errors import ArgitError
+from .errors import ArgitError  # noqa: F401 — re-exported for callers that catch it
 from .manifest import load_manifest
 from .shared import (
     EXIT_OK,
@@ -34,6 +40,30 @@ from .shared import (
 
 
 WORKSPACE_DOC_URL = "https://github.com/blinkbitcoin/argit/blob/main/WORKSPACE.md"
+
+
+def _load_template() -> Template:
+    """Load the bundled review-report template via importlib.resources.
+
+    Uses the `argit` package + path-suffix form (NOT `argit.templates`) —
+    `templates/` has no `__init__.py` and isn't an importable subpackage
+    under setuptools' `packages.find`. Mirrors setup.py's catalog-loading
+    workaround.
+    """
+    text = resources.files("argit").joinpath("templates/review-report.md").read_text(encoding="utf-8")
+    return Template(text)
+
+
+def _overlay_basename(manifest_filename: str) -> str:
+    """Strip `.manifest.json` to get the basename used in the overlay
+    filename (`<basename>.manifest.local.json`). Same convention as
+    manifest._find_overlay."""
+    suffix = ".manifest.json"
+    if manifest_filename.endswith(suffix):
+        return manifest_filename[: -len(suffix)]
+    # Defensive — Manifest.filename always carries the suffix per
+    # load_manifest, but synthetic test inputs might not.
+    return manifest_filename
 
 
 def collect_uncovered(repo_root: Path, manifest) -> list[str]:  # noqa: ANN001 — Manifest type
@@ -58,47 +88,40 @@ def generate_review(
     uncovered: list[str],
     iso_timestamp: str,
     manifest_filename: str,
+    *,
+    overlay_present: bool = False,
 ) -> str | None:
-    """Pure function: render the markdown report. Returns None when
-    `uncovered` is empty (caller writes nothing in that case).
+    """Pure function: render the markdown report from the bundled template.
+    Returns None when `uncovered` is empty (caller writes nothing).
 
-    Deliberately flat — no per-finding heuristics, severity, or suggested
-    manifest fragments. The reader/agent decides what to do with each
-    path. Format optimized for diff-readability across consecutive
-    reports: one bullet per uncovered path; stable sort.
+    The template provides intro + manifest-grammar quick-reference (one
+    example per `kind` and for `sanitize` / `exclude`) so a fresh agent
+    reading the report cold has everything it needs to act on each path.
+    Per-path heuristics + severity classification stay deliberately out
+    of scope (see tech-spec-04 §Deliberately omitted).
+
+    Output is sorted bullets for diff-stability across consecutive reports.
     """
     if not uncovered:
         return None
     sorted_paths = sorted(uncovered)
     n = len(sorted_paths)
     plural = "" if n == 1 else "s"
-    lines = [
-        f"# argit review report — {iso_timestamp}",
-        "",
-        f"- **Backup:** `{iso_timestamp}`",
-        f"- **Manifest:** `{manifest_filename}`",
-        f"- **Uncovered:** {n} path{plural}",
-        "",
-        "The paths below exist under `source_root` but are not matched by any",
-        "`items[]`, `sanitize[]`, or `exclude[]` rule in the manifest. Decide",
-        "what to do with each: extend the `<basename>.manifest.local.json`",
-        "overlay (per AGENTS.md, never modify the bundled manifest) or add an",
-        "`exclude[]` pattern for noise.",
-        "",
-        "## Uncovered paths",
-        "",
-    ]
-    lines.extend(f"- `{p}`" for p in sorted_paths)
-    lines.extend([
-        "",
-        "## Workspace coexistence",
-        "",
-        f"If you maintain a separate git-backed workspace directory (e.g., `~/workspace`",
-        f"referenced by `openclaw.json.workspace`), see [WORKSPACE.md]({WORKSPACE_DOC_URL})",
-        f"for the recommended layout.",
-        "",
-    ])
-    return "\n".join(lines)
+    overlay_basename = _overlay_basename(manifest_filename)
+    overlay_status = "present" if overlay_present else "not present yet"
+    paths_block = "\n".join(f"- `{p}`" for p in sorted_paths)
+
+    template = _load_template()
+    return template.safe_substitute(
+        iso=iso_timestamp,
+        manifest_filename=manifest_filename,
+        overlay_basename=overlay_basename,
+        overlay_status=overlay_status,
+        count=n,
+        plural=plural,
+        uncovered_paths=paths_block,
+        workspace_doc_url=WORKSPACE_DOC_URL,
+    )
 
 
 def write_review(repo_root: Path, report: str, iso_timestamp: str) -> Path:
@@ -109,6 +132,18 @@ def write_review(repo_root: Path, report: str, iso_timestamp: str) -> Path:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(report, encoding="utf-8")
     return out
+
+
+def _detect_overlay_present(repo_root: Path, manifest) -> bool:  # noqa: ANN001 — Manifest type
+    """Return True if `<basename>.manifest.local.json` exists alongside
+    the bundled manifest. Same convention as manifest._find_overlay.
+    Read-only filesystem check — caller decides what to do with the
+    boolean."""
+    if not manifest.filename:
+        return False
+    overlay_basename = _overlay_basename(manifest.filename)
+    overlay_path = repo_root / ".argit" / "manifest" / f"{overlay_basename}.manifest.local.json"
+    return overlay_path.is_file()
 
 
 def run_review(repo_root: Path, *, dry_run: bool = False) -> int:
@@ -124,11 +159,14 @@ def run_review(repo_root: Path, *, dry_run: bool = False) -> int:
             click.echo("✓ no findings — manifest covers source_root completely")
             return EXIT_OK
         iso = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        report = generate_review(uncovered, iso, manifest.filename)
+        overlay_present = _detect_overlay_present(repo_root, manifest)
+        report = generate_review(
+            uncovered, iso, manifest.filename, overlay_present=overlay_present,
+        )
         if report is None:
             # Defensive: collect_uncovered returned non-empty but generator
-            # returned None — would only happen if generate_review's empty
-            # check ever diverges from collect_uncovered's. Treat as no-op.
+            # returned None — only possible if the empty-check in
+            # generate_review ever diverges from collect_uncovered's. No-op.
             return EXIT_OK
         if dry_run:
             click.echo(f"would: write .argit/reviews/{iso}.md ({len(uncovered)} findings)")

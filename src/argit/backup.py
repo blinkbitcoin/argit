@@ -338,8 +338,11 @@ def run_backup(repo_root: Path, *, commit: bool, push: bool, strict: bool, dry_r
             # → no orphan review for a partial backup.
             review_path: Path | None = None
             if unspecified:
-                from .review import generate_review, write_review
-                report = generate_review(unspecified, iso, manifest.filename)
+                from .review import _detect_overlay_present, generate_review, write_review
+                report = generate_review(
+                    unspecified, iso, manifest.filename,
+                    overlay_present=_detect_overlay_present(repo_root, manifest),
+                )
                 if report is not None:
                     if dry_run:
                         _emit(True, f"write .argit/reviews/{iso}.md ({len(unspecified)} findings)")

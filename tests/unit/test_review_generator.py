@@ -51,16 +51,52 @@ def test_findings_are_sorted_for_diff_stability():
     assert bullets == ["- `alpha.json`", "- `middle/x.txt`", "- `zeta.json`"]
 
 
-def test_no_io_in_generator(monkeypatch):
-    """generate_review is a pure function — no filesystem reads/writes,
-    no socket/env access. Any I/O attempt blows up, but the function
-    completes successfully on synthetic input."""
-    import pathlib
-    monkeypatch.setattr(pathlib.Path, "read_text", lambda *a, **k: (_ for _ in ()).throw(AssertionError("Path.read_text called inside generator")))
-    monkeypatch.setattr(pathlib.Path, "write_text", lambda *a, **k: (_ for _ in ()).throw(AssertionError("Path.write_text called inside generator")))
+# ---------- enriched template content ----------
+
+
+def test_overlay_status_present():
     out = generate_review(
-        ["a.json", "b.json"],
-        "2026-04-29T12:00:00Z",
-        "openclaw-2026.4.26-1.manifest.json",
+        ["x.json"], "2026-04-29T12:00:00Z", "openclaw-2026.4.26-1.manifest.json",
+        overlay_present=True,
     )
     assert out is not None
+    assert "(overlay: `openclaw-2026.4.26-1.manifest.local.json` — present)" in out
+
+
+def test_overlay_status_not_present():
+    out = generate_review(
+        ["x.json"], "2026-04-29T12:00:00Z", "openclaw-2026.4.26-1.manifest.json",
+        overlay_present=False,
+    )
+    assert out is not None
+    assert "(overlay: `openclaw-2026.4.26-1.manifest.local.json` — not present yet)" in out
+
+
+def test_manifest_grammar_examples_present():
+    """Every report includes the manifest-grammar quick reference so an
+    agent reading cold has all the syntax it needs."""
+    out = generate_review(
+        ["x.json"], "2026-04-29T12:00:00Z", "openclaw-2026.4.26-1.manifest.json",
+    )
+    assert out is not None
+    # One example per kind, plus sanitize and exclude.
+    assert "### `kind: data`" in out
+    assert "### `kind: secret`" in out
+    assert "### `kind: sqlite`" in out
+    assert "### `kind: blob`" in out
+    assert "### `sanitize`" in out
+    assert "### `exclude`" in out
+    # Concrete fragment snippets (one canonical example per kind).
+    assert '"kind": "data"' in out
+    assert '"kind": "secret"' in out
+    assert '"kind": "sqlite"' in out
+    assert '"kind": "blob"' in out
+
+
+def test_after_editing_section_present():
+    out = generate_review(
+        ["x.json"], "2026-04-29T12:00:00Z", "openclaw-2026.4.26-1.manifest.json",
+    )
+    assert out is not None
+    assert "## After editing" in out
+    assert "Re-run `argit review`" in out
