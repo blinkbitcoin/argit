@@ -136,11 +136,25 @@ def test_malformed_catalog_is_silent(tmp_path, capsys):
     assert captured.err == ""
 
 
+def test_empty_catalog_is_silent(tmp_path, capsys):
+    """No catalog shipped (pre-Track-A install or packaging glitch) →
+    `_classify_drift` would return `operator_modified` for everything,
+    but the helper short-circuits BEFORE that classification fires.
+    Without this guard every backup would emit a noisy false-positive
+    in pre-catalog deployments. Locks in the empty-catalog fix."""
+    repo = _make_repo(tmp_path, "openclaw-2026.4.14-7.manifest.json")
+    with patch("argit.setup._load_hash_catalog", return_value={}):
+        _warn_on_bundled_drift(repo, _manifest("openclaw-2026.4.14-7.manifest.json"))
+    captured = capsys.readouterr()
+    assert captured.err == ""
+
+
 def test_unknown_filename_classifies_operator_modified(tmp_path, capsys):
-    """A bundled-shaped filename not present in the catalog classifies as
-    `operator_modified` → warning fires. (This is the agent-misbehavior
-    case: the agent edited the manifest enough that the hash no longer
-    matches anything in the catalog.)"""
+    """A bundled-shaped filename present in the catalog but with mutated
+    on-disk content classifies as `operator_modified` → warning fires.
+    (This is the agent-misbehavior case: the agent edited the manifest
+    enough that its hash no longer matches the catalog entry for that
+    filename.)"""
     rev7 = _make_rev(tmp_path, 7)
     repo = _make_repo(tmp_path, "openclaw-2026.4.14-7.manifest.json")
     # Repo's bundled is mutated content (different from rev7).

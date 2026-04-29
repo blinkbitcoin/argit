@@ -160,17 +160,35 @@ def _warn_on_bundled_drift(repo_root: Path, manifest: Manifest) -> None:
     # etc.) that backup doesn't otherwise pay for. Lazy keeps backup's
     # cold-import time tight.
     try:
-        from .setup import _classify_drift
+        from .setup import _classify_drift, _load_hash_catalog
     except ImportError:
         return
+    # Explicit empty-catalog short-circuit. `_classify_drift` returns
+    # `operator_modified` when the catalog is empty/missing (pre-Track-A
+    # install, packaging glitch, missing wheel asset). Without this guard
+    # every backup would emit a noisy false-positive in those cases —
+    # exactly the "trains operators to ignore warnings" failure we want
+    # to avoid.
+    try:
+        catalog = _load_hash_catalog()
+    except ArgitError:
+        return  # malformed catalog — silent
+    if not catalog:
+        return  # no catalog shipped — silent
     try:
         kind, _rev = _classify_drift(bundled_path)
     except ArgitError:
-        return  # malformed catalog, unreadable bundled, invalid JSON — silent
+        return  # unreadable bundled, invalid JSON — silent
     if kind == "operator_modified":
+        # Wording is neutral: `operator_modified` covers hand-edits AND
+        # legitimate operator customization AND custom forks. Don't pretend
+        # we know it was the agent. Operator/agent reads the warning and
+        # decides whether the local edit was intentional.
         _warn(
-            f"bundled manifest hash mismatch — {manifest.filename} has been "
-            f"hand-edited. Run `argit setup` to inspect drift."
+            f"bundled manifest hash mismatch — {manifest.filename} doesn't "
+            f"match any known bundled revision. Run `argit setup` to inspect "
+            f"drift; if the local edit was intentional, move it into "
+            f"`<basename>.manifest.local.json` overlay."
         )
 
 
