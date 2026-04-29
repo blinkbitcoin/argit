@@ -248,6 +248,11 @@ def run_restore(repo_root: Path, *, target: str | None, overwrite: bool, merge: 
 
             # Track what we wrote, for verify.
             written_files: list[tuple[Path, str]] = []
+            # Pass paths we deliberately skipped because the secret was never
+            # backed up (source was absent at backup time). Verify must not
+            # re-flag these — restore already warned, and the absence is
+            # legitimate, not corruption.
+            skipped_secret_pass_paths: set[str] = set()
 
             # 4. Sanitized-config restore
             for sf in manifest.sanitize:
@@ -283,6 +288,7 @@ def run_restore(repo_root: Path, *, target: str | None, overwrite: bool, merge: 
                     continue
                 if not pass_wrap.has(it.pass_path):
                     _warn(f"pass entry missing: {it.pass_path} (skipping {it.source})")
+                    skipped_secret_pass_paths.add(it.pass_path)
                     continue
                 value = pass_wrap.show(it.pass_path)
                 dst.parent.mkdir(parents=True, exist_ok=True)
@@ -383,8 +389,12 @@ def run_restore(repo_root: Path, *, target: str | None, overwrite: bool, merge: 
                     for path_, pp in leftovers:
                         verify_failures.append(f"{dst}: leftover placeholder at {path_} (pass: {pp})")
 
-                # (b) every kind: secret pass path resolves
+                # (b) every kind: secret pass path resolves — but skip items
+                # the restore loop already warned about as legitimately
+                # absent (source missing at backup → no pass entry written).
                 for it in [i for i in concrete_items if i.kind == "secret"]:
+                    if it.pass_path in skipped_secret_pass_paths:
+                        continue
                     if not pass_wrap.has(it.pass_path):
                         verify_failures.append(f"pass path missing: {it.pass_path}")
 
