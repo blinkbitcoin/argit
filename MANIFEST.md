@@ -97,7 +97,7 @@ restore, placeholders are re-injected from pass.
 | `target` | string | Path relative to the repo root where the sanitized output is written. |
 | `mode` | string | Octal mode applied to the restored file. |
 | `rules[]` | array | One or more extraction rules. |
-| `rules[].path` | string | Dotted JSON path (`.foo.bar.baz`). No wildcards. |
+| `rules[].path` | string | Dotted JSON path (`.foo.bar.baz`). Single whole-segment `*` wildcard supported (see §Wildcards). |
 | `rules[].pass` | string | pass-store entry path (under `argit/<agent-type>/...`). |
 | `rules[].subtree` | boolean (optional, default `false`) | When `true`, the whole JSON subtree at `path` is serialized and stored as one pass entry. When `false` (default), only the leaf value is stored. |
 
@@ -126,11 +126,40 @@ JSON keyword:
 }
 ```
 
-### Wildcards (not supported)
+### Wildcards
 
-Grammar rejects `*` in `path`. For wildcard-like needs (e.g.,
-`profiles.*.token`), store the whole file as a `kind: secret` item instead.
-This keeps the manifest grammar small and auditable.
+A single whole-segment `*` is supported in `rules[].path`. At sanitize-time
+the rule expands to one concrete rule per matched key in the dict at the
+wildcard depth, each with its own derived `pass_path`.
+
+```json
+{ "path": ".channels.telegram.accounts.*.botToken" }
+```
+
+Resolves against:
+```json
+{ "channels": { "telegram": { "accounts": {
+  "default": { "botToken": "tok-d", "allowFrom": "..." },
+  "erbot":   { "botToken": "tok-e" }
+} } } }
+```
+
+…producing two pass entries:
+- `argit/openclaw/openclaw/channels/telegram/accounts/default/bot-token` ← `tok-d`
+- `argit/openclaw/openclaw/channels/telegram/accounts/erbot/bot-token` ← `tok-e`
+
+Non-secret keys in each subtree (e.g. `allowFrom`) remain visible in the
+sanitized JSON.
+
+Constraints:
+- `*` MUST be a whole segment — `foo*` and `*bar` are rejected.
+- At most one `*` per path. Nested wildcards: split into multiple rules.
+- `*` MUST NOT be the first segment.
+- Zero matches at the wildcard depth are treated as "skipped" (warn-and-
+  continue), the same as a fixed path that doesn't exist in the source.
+- A non-dict prefix raises (author/config bug).
+
+For top-level fan-out, store the whole file as a `kind: secret` item.
 
 ---
 
@@ -290,7 +319,7 @@ at the specific field:
 - All required top-level fields present and non-empty.
 - Every `items[]` entry has a valid `kind`.
 - `sanitize[]` rules have non-empty `rules[]`.
-- `path` in sanitize rules has no `*` (wildcards rejected).
+- `path` in sanitize rules: at most one whole-segment `*`, never the first segment (see §Wildcards).
 - `mode` strings parse as 3- or 4-digit octal values (e.g. `"700"` or `"0700"` —
   both accepted, normalized internally).
 - `lifecycle.*.command` is a non-empty argv list when defined.

@@ -190,6 +190,40 @@ def _parse_lifecycle(d: dict | None) -> Lifecycle | None:
     )
 
 
+def _validate_sanitize_path(path: str, loc: str) -> None:
+    """Sanitize-path grammar — narrow wildcard support.
+
+      - `*` MUST be a whole dotted segment (reject `foo*`, `*bar`, `f*o`).
+      - At most one `*` per path.
+      - `*` MUST NOT be the first segment (top-level wildcard would
+        fan out across every key in the file — explicit subtree:true is the
+        right tool for that and avoids accidental over-sanitization).
+
+    Wildcard at the LAST segment is allowed: `.foo.*` with subtree:true means
+    "every value under foo is its own subtree pass entry".
+    """
+    if "*" not in path:
+        return
+    segments = path.lstrip(".").split(".")
+    star_count = sum(1 for s in segments if s == "*")
+    raw_star_segments = sum(1 for s in segments if "*" in s)
+    if raw_star_segments != star_count:
+        raise ArgitError(
+            f"{loc}.path '{path}': '*' must be a whole segment, not part of one",
+            "use '.foo.*.bar' (whole-segment wildcard); '.foo*'/'.f*o' are not supported",
+        )
+    if star_count > 1:
+        raise ArgitError(
+            f"{loc}.path '{path}': at most one '*' segment per path",
+            "split into multiple rules; nested wildcards are not supported",
+        )
+    if segments[0] == "*":
+        raise ArgitError(
+            f"{loc}.path '{path}': '*' may not be the first segment",
+            "anchor the path with a literal first segment; use a kind:secret on the whole file for top-level fan-out",
+        )
+
+
 def _parse_sanitize_rules(
     rules: list, where: str, agent_type: str, file: str, source_label: str
 ) -> list[SanitizeRule]:
@@ -205,11 +239,7 @@ def _parse_sanitize_rules(
             )
         _check_unknown_keys(r, _ALLOWED_RULE_KEYS, loc)
         path = _require(r, "path", loc)
-        if "*" in path:
-            raise ArgitError(
-                f"{loc}.path '{path}' contains wildcard '*'",
-                "wildcards are unsupported; store the whole file as kind: secret instead",
-            )
+        _validate_sanitize_path(path, loc)
         pass_p = path_conventions.derive_pass(agent_type, file, path)
         out.append(SanitizeRule(path=path, pass_path=pass_p, subtree=bool(r.get("subtree", False))))
     return out

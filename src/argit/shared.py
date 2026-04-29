@@ -76,6 +76,58 @@ EXIT_PARTIAL_STATE = 5
 
 LOCK_TIMEOUT_SEC = 5
 REQUIRED_PYTHON = (3, 10)
+VERSION_CHECK_TIMEOUT_SEC = 5
+
+
+# ---------- version parsing ----------
+
+_VER_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*(?:-[0-9A-Za-z.]+)?$")
+
+
+def version_parseable(s: str) -> bool:
+    return bool(_VER_RE.match(s))
+
+
+def version_cmp(a: str, b: str) -> int:
+    """Component-wise compare of dotted-numeric versions (ignore -<build> suffix)."""
+    def parts(v: str) -> list[int]:
+        head = v.split("-", 1)[0]
+        return [int(x) for x in head.split(".") if x.isdigit()]
+    pa, pb = parts(a), parts(b)
+    n = max(len(pa), len(pb))
+    pa += [0] * (n - len(pa))
+    pb += [0] * (n - len(pb))
+    if pa < pb:
+        return -1
+    if pa > pb:
+        return 1
+    return 0
+
+
+def probe_agent_version(binary: str) -> str | None:
+    """Run `<binary> --version` and return the first parseable version token.
+    Returns None on every failure mode (binary missing, timeout, non-zero exit,
+    no parseable token) — caller decides how to react. Never raises.
+    """
+    if shutil.which(binary) is None:
+        return None
+    try:
+        cp = subprocess.run(
+            [binary, "--version"],
+            capture_output=True, text=True,
+            timeout=VERSION_CHECK_TIMEOUT_SEC, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if cp.returncode != 0:
+        return None
+    raw = (cp.stdout + cp.stderr).strip().split()
+    if not raw:
+        return None
+    return next(
+        (t for t in (c.lstrip("v") for c in raw) if version_parseable(t)),
+        None,
+    )
 
 
 # ---------- platform ----------

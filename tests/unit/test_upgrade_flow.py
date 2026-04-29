@@ -76,9 +76,15 @@ def test_a16_missing_manifest_dir_is_noop(tmp_path):
 # ---------- end-to-end run_setup upgrade-decision helpers ----------
 
 @contextlib.contextmanager
-def _stub_setup_env(catalog: dict[str, str]):
+def _stub_setup_env(catalog: dict[str, str], agent_version: str = "2026.4.14"):
     """Patch out preflight + post-drift steps in run_setup so we only
-    exercise the _handle_drift branch."""
+    exercise the _handle_drift branch.
+
+    `agent_version` pins the simulated live-agent version — selection inside
+    `_handle_drift` is now best-fit, so the test must declare which agent
+    version the operator is running. Default 2026.4.14 keeps the existing
+    "rev 1 → latest in 2026.4.14" upgrade semantics these tests assert.
+    """
     with contextlib.ExitStack() as stack:
         stack.enter_context(patch("argit.setup._collect_preflight_failures", lambda r: []))
         stack.enter_context(patch("argit.setup._ensure_manifest", lambda *a, **k: False))
@@ -89,6 +95,7 @@ def _stub_setup_env(catalog: dict[str, str]):
         stack.enter_context(patch("argit.setup._detect_agent_key", lambda gpg, ak: "A" * 40))
         stack.enter_context(patch("argit.setup._run_pass_init", lambda *a, **k: None))
         stack.enter_context(patch("argit.setup._load_hash_catalog", return_value=catalog))
+        stack.enter_context(patch("argit.setup.probe_agent_version", return_value=agent_version))
         mock_gpg = stack.enter_context(patch("argit.setup.GpgWrap"))
         inst = mock_gpg.return_value
         inst.is_key_imported.return_value = True
@@ -96,23 +103,26 @@ def _stub_setup_env(catalog: dict[str, str]):
         yield
 
 
-def _fake_catalog(repo_rev: int) -> tuple[Path, dict, int]:
-    """Return a bundled-manifest path at `repo_rev`, a full catalog covering
-    all shipped revisions, and the latest shipped rev number."""
+def _fake_catalog(repo_rev: int, agent_version: str = "2026.4.14") -> tuple[Path, dict, int]:
+    """Return the bundled-manifest path at `(agent_version, repo_rev)`, the
+    full catalog covering all shipped revisions, and the highest shipped rev
+    *within `agent_version`* (the upgrade target operators on that agent see).
+    """
     from argit.setup import _all_bundled_manifest_paths
     from argit.manifest import parse_filename
     catalog: dict[str, str] = {}
     repo_path = None
-    revs = []
+    revs_in_version: list[int] = []
     for bp in _all_bundled_manifest_paths():
         catalog[bp.name] = canonical_hash(bp)
-        _, _, r = parse_filename(bp.name)
-        revs.append(r)
-        if r == repo_rev:
-            repo_path = bp
+        _, ver, r = parse_filename(bp.name)
+        if ver == agent_version:
+            revs_in_version.append(r)
+            if r == repo_rev:
+                repo_path = bp
     if repo_path is None:
-        raise RuntimeError(f"no bundled manifest at rev {repo_rev}")
-    return repo_path, catalog, max(revs)
+        raise RuntimeError(f"no bundled manifest at {agent_version}-{repo_rev}")
+    return repo_path, catalog, max(revs_in_version)
 
 
 def _stage_repo_in_cwd(cwd: str, manifest_src: Path) -> Path:
@@ -228,7 +238,7 @@ def test_a4_upgrade_interactive_y_writes_new_bundled(tmp_path):
     and the on-disk hash matches the catalog's latest-rev entry."""
     repo_manifest_src, catalog, latest_rev = _fake_catalog(repo_rev=1)
     from argit.setup import _bundled_manifest_path
-    bundled = _bundled_manifest_path()
+    bundled = _bundled_manifest_path(agent_version="2026.4.14")
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=str(tmp_path)) as cwd:
         repo = _stage_repo_in_cwd(cwd, repo_manifest_src)
@@ -255,7 +265,8 @@ def test_a4_upgrade_yes_flag_writes_new_bundled(tmp_path):
     """--yes (non-dry-run) auto-accepts without stdin and writes bundled."""
     repo_manifest_src, catalog, latest_rev = _fake_catalog(repo_rev=1)
     from argit.setup import _bundled_manifest_path
-    bundled = _bundled_manifest_path()
+    # Match what _handle_drift selects given the simulated agent version.
+    bundled = _bundled_manifest_path(agent_version="2026.4.14")
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=str(tmp_path)) as cwd:
         repo = _stage_repo_in_cwd(cwd, repo_manifest_src)
