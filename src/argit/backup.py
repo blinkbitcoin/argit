@@ -23,8 +23,6 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Iterable
-
 import click
 
 from .errors import ArgitError
@@ -36,11 +34,14 @@ from .shared import (
     VERSION_CHECK_TIMEOUT_SEC,
     acquire_lock,
     check_no_partial_state,
+    covered_by_items,
+    covered_by_sanitize,
     in_progress_marker,
     matches_exclude,
     run_preflight,
     version_cmp,
     version_parseable,
+    walk_relative,
 )
 
 
@@ -52,87 +53,6 @@ def _emit(dry: bool, msg: str) -> None:
 
 def _warn(msg: str) -> None:
     click.echo("! " + msg, err=True)
-
-
-def _walk_relative(root: Path) -> Iterable[Path]:
-    """Yield every file and symlink under `root`, plus any EMPTY directory
-    (one containing no files anywhere in its subtree). Empty dirs are
-    reported so a freshly-created `future-plugin/` fires the
-    unspecified-files warning even before it has content."""
-    if not root.is_dir():
-        return
-    files_by_dir: dict[Path, int] = {}
-    for p in root.rglob("*"):
-        rel = p.relative_to(root)
-        if p.is_file() or p.is_symlink():
-            yield rel
-            # Mark every parent as "has content"
-            for parent in rel.parents:
-                files_by_dir[parent] = files_by_dir.get(parent, 0) + 1
-        elif p.is_dir():
-            files_by_dir.setdefault(rel, 0)
-    for dir_path, count in files_by_dir.items():
-        if count == 0 and str(dir_path) != ".":
-            yield dir_path
-
-
-def _is_under(rel: Path, prefix: str) -> bool:
-    """Path covers a path or directory prefix (`source` ending with `/`)."""
-    if prefix.endswith("/"):
-        prefix_clean = prefix.rstrip("/")
-        return str(rel).startswith(prefix_clean + "/") or str(rel) == prefix_clean
-    return str(rel) == prefix
-
-
-def _glob_pattern_matches(rel_str: str, pattern: str) -> bool:
-    """Component-wise match: `*` is a single-component wildcard (regex [^/]+).
-
-    Whole-source `*` patterns must NOT cross `/`. Pattern components must
-    equal the path components one-for-one (or be `*`). Trailing-slash dir
-    patterns match the directory prefix — `agents/*/` covers `agents/main/`
-    and everything under it.
-    """
-    dir_pat = pattern.endswith("/")
-    pat_clean = pattern.rstrip("/")
-    pat_parts = pat_clean.split("/")
-    rel_parts = rel_str.split("/")
-    if dir_pat:
-        if len(rel_parts) < len(pat_parts):
-            return False
-        for pp, rp in zip(pat_parts, rel_parts):
-            if pp == "*":
-                continue
-            if pp != rp:
-                return False
-        return True
-    if len(rel_parts) != len(pat_parts):
-        return False
-    for pp, rp in zip(pat_parts, rel_parts):
-        if pp == "*":
-            continue
-        if pp != rp:
-            return False
-    return True
-
-
-def _covered_by_items(rel: Path, items: list[Item]) -> bool:
-    rel_str = str(rel)
-    for it in items:
-        if it.is_globbed:
-            if _glob_pattern_matches(rel_str, it.source):
-                return True
-        else:
-            if _is_under(rel, it.source):
-                return True
-    return False
-
-
-def _covered_by_sanitize(rel: Path, sf: list[SanitizeFile]) -> bool:
-    s = str(rel)
-    for f in sf:
-        if s == f.file:
-            return True
-    return False
 
 
 def _check_chmod(path: Path, mode: str) -> None:
@@ -254,12 +174,12 @@ def run_backup(repo_root: Path, *, commit: bool, push: bool, strict: bool, dry_r
         # 2. Unspecified-files walk — READ ONLY; failures here leave no
         # partial state, so we stay outside the in-progress marker.
         unspecified: list[str] = []
-        for rel in _walk_relative(source_root):
+        for rel in walk_relative(source_root):
             if matches_exclude(rel, manifest.exclude):
                 continue
-            if _covered_by_items(rel, manifest.items):
+            if covered_by_items(rel, manifest.items):
                 continue
-            if _covered_by_sanitize(rel, manifest.sanitize):
+            if covered_by_sanitize(rel, manifest.sanitize):
                 continue
             unspecified.append(str(rel))
         if unspecified:
@@ -411,9 +331,25 @@ def run_backup(repo_root: Path, *, commit: bool, push: bool, strict: bool, dry_r
             else:
                 _emit(True, f"write {last_backup.relative_to(repo_root)}")
 
+            # Auto-emit review report when uncovered files exist. Same `iso`
+            # is reused so the report filename, last-backup.json timestamp,
+            # and (when --commit) the commit message all share one moment.
+            # Failed phases above propagate exceptions and skip this write
+            # → no orphan review for a partial backup.
+            review_path: Path | None = None
+            if unspecified:
+                from .review import generate_review, write_review
+                report = generate_review(unspecified, iso, manifest.filename)
+                if report is not None:
+                    if dry_run:
+                        _emit(True, f"write .argit/reviews/{iso}.md ({len(unspecified)} findings)")
+                    else:
+                        review_path = write_review(repo_root, report, iso)
+                        _emit(False, f"review: .argit/reviews/{iso}.md ({len(unspecified)} findings)")
+
             # 8. --commit
             if commit:
-                _git_commit(repo_root, manifest, concrete_items, iso, dry_run)
+                _git_commit(repo_root, manifest, concrete_items, iso, dry_run, review_path=review_path)
 
             # 9. --push
             if push:
@@ -448,11 +384,16 @@ def _current_git_sha(repo_root: Path) -> str | None:
 
 def _git_commit(
     repo_root: Path, manifest: Manifest, concrete_items: list[Item], iso: str, dry: bool,
+    *, review_path: Path | None = None,
 ) -> None:
     """Stage manifest's managed paths + secrets/ + .argit/last-backup.json; commit.
 
     `concrete_items` — the post-glob-expansion item list, so `it.target`
     is always a concrete path (never contains `*`).
+
+    `review_path` — when auto-emit wrote a review report this run, its
+    relative path is staged alongside backup state so the audit trail in
+    the commit shows what argit flagged at the moment of backup.
     """
     paths_to_add: list[str] = []
     for it in concrete_items:
@@ -464,6 +405,8 @@ def _git_commit(
         paths_to_add.append(sf.target)
     paths_to_add.append("secrets/")
     paths_to_add.append(".argit/last-backup.json")
+    if review_path is not None:
+        paths_to_add.append(str(review_path.relative_to(repo_root)))
 
     if dry:
         _emit(True, f"git add: {paths_to_add}")

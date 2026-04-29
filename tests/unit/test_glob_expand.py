@@ -212,7 +212,7 @@ def test_b5_unspecified_walk_covers_globbed_items():
     """A file whose path matches a globbed item's source must be treated
     as covered by the unspecified-files walk (not flagged with 'not in
     manifest' warning)."""
-    from argit.backup import _covered_by_items
+    from argit.shared import covered_by_items as _covered_by_items
 
     items = [
         _glob_item("data", "agents/*/agent/auth-state.json"),
@@ -228,7 +228,7 @@ def test_b5_unspecified_walk_covers_globbed_items():
 
 def test_b5_unspecified_walk_handles_dir_glob_coverage():
     """A trailing-slash glob covers the directory and everything under it."""
-    from argit.backup import _covered_by_items
+    from argit.shared import covered_by_items as _covered_by_items
 
     items = [
         _glob_item("blob", "agents/*/"),
@@ -242,7 +242,7 @@ def test_b5_unspecified_walk_handles_dir_glob_coverage():
 
 def test_b5_mixed_globbed_and_literal_items():
     """Mix of glob + literal items — each still covers its own paths."""
-    from argit.backup import _covered_by_items
+    from argit.shared import covered_by_items as _covered_by_items
 
     items = [
         _glob_item("data", "agents/*/agent/auth-state.json"),

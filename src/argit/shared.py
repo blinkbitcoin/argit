@@ -20,9 +20,12 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from typing import TYPE_CHECKING, Iterable, Iterator
 
 from .errors import ArgitError
+
+if TYPE_CHECKING:
+    from .manifest import Item, SanitizeFile
 
 
 def matches_exclude(rel: Path, patterns: list[str]) -> bool:
@@ -63,6 +66,93 @@ def matches_exclude(rel: Path, patterns: list[str]) -> bool:
         if pat.endswith("/") and fnmatch.fnmatch(s, pat.rstrip("/")):
             return True
     return False
+
+
+# ---------- coverage helpers ----------
+# Lifted from backup.py so review.py can share the same coverage check
+# without duplicating logic. Mirrors the existing matches_exclude precedent.
+
+
+def walk_relative(root: Path) -> Iterable[Path]:
+    """Yield every file and symlink under `root`, plus any EMPTY directory
+    (one containing no files anywhere in its subtree). Empty dirs are
+    reported so a freshly-created `future-plugin/` fires the
+    unspecified-files warning even before it has content."""
+    if not root.is_dir():
+        return
+    files_by_dir: dict[Path, int] = {}
+    for p in root.rglob("*"):
+        rel = p.relative_to(root)
+        if p.is_file() or p.is_symlink():
+            yield rel
+            # Mark every parent as "has content"
+            for parent in rel.parents:
+                files_by_dir[parent] = files_by_dir.get(parent, 0) + 1
+        elif p.is_dir():
+            files_by_dir.setdefault(rel, 0)
+    for dir_path, count in files_by_dir.items():
+        if count == 0 and str(dir_path) != ".":
+            yield dir_path
+
+
+def is_under(rel: Path, prefix: str) -> bool:
+    """Path covers a path or directory prefix (`source` ending with `/`)."""
+    if prefix.endswith("/"):
+        prefix_clean = prefix.rstrip("/")
+        return str(rel).startswith(prefix_clean + "/") or str(rel) == prefix_clean
+    return str(rel) == prefix
+
+
+def glob_pattern_matches(rel_str: str, pattern: str) -> bool:
+    """Component-wise match: `*` is a single-component wildcard (regex [^/]+).
+
+    Whole-source `*` patterns must NOT cross `/`. Pattern components must
+    equal the path components one-for-one (or be `*`). Trailing-slash dir
+    patterns match the directory prefix — `agents/*/` covers `agents/main/`
+    and everything under it.
+    """
+    dir_pat = pattern.endswith("/")
+    pat_clean = pattern.rstrip("/")
+    pat_parts = pat_clean.split("/")
+    rel_parts = rel_str.split("/")
+    if dir_pat:
+        if len(rel_parts) < len(pat_parts):
+            return False
+        for pp, rp in zip(pat_parts, rel_parts):
+            if pp == "*":
+                continue
+            if pp != rp:
+                return False
+        return True
+    if len(rel_parts) != len(pat_parts):
+        return False
+    for pp, rp in zip(pat_parts, rel_parts):
+        if pp == "*":
+            continue
+        if pp != rp:
+            return False
+    return True
+
+
+def covered_by_items(rel: Path, items: list[Item]) -> bool:
+    rel_str = str(rel)
+    for it in items:
+        if it.is_globbed:
+            if glob_pattern_matches(rel_str, it.source):
+                return True
+        else:
+            if is_under(rel, it.source):
+                return True
+    return False
+
+
+def covered_by_sanitize(rel: Path, sf: list[SanitizeFile]) -> bool:
+    s = str(rel)
+    for f in sf:
+        if s == f.file:
+            return True
+    return False
+
 
 IT_BACKUP_FPR = "1107BD74F292CD3EAB0CF59D49F2D3353A88D34E"
 IT_BACKUP_UID = "IT Backup <a@blinkbtc.com>"
