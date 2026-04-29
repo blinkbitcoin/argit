@@ -44,7 +44,7 @@ def test_happy_path(tmp_path):
     repo = _init_repo(tmp_path, body, BUNDLED.name)
     m = load_manifest(repo)
     assert m.agent_type == "openclaw"
-    assert m.agent_version == "2026.4.14"
+    assert m.agent_version == body["agent_version"]
     assert m.manifest_revision == body["manifest_revision"]
     assert m.schema_version == 1
     assert len(m.sanitize) == 2
@@ -107,16 +107,40 @@ def test_all_bundled_revisions_parse_cleanly(tmp_path):
         assert m.filename == path.name
 
 
-def test_bundled_manifest_path_picks_latest_revision():
-    """`_bundled_manifest_path()` should return the highest-revision
-    bundled manifest for the agent_type+agent_version pair."""
+def test_bundled_manifest_path_picks_latest_across_versions():
+    """`_bundled_manifest_path()` (no agent_version) returns the latest
+    available across ALL agent_versions: highest agent_version, then highest
+    revision within that version."""
     from argit.setup import _all_bundled_manifest_paths, _bundled_manifest_path
 
     latest = _bundled_manifest_path()
     all_revisions = _all_bundled_manifest_paths()
-    # latest must be one of the shipped paths and have the highest revision number
-    revisions = [parse_filename(p.name)[2] for p in all_revisions]
-    assert parse_filename(latest.name)[2] == max(revisions)
+    # Build (version_tuple, rev) keys and assert `latest` has the max.
+    def _vkey(name):
+        _, ver, rev = parse_filename(name)
+        return ([int(p) for p in ver.split("-", 1)[0].split(".") if p.isdigit()], rev)
+    assert _vkey(latest.name) == max(_vkey(p.name) for p in all_revisions)
+
+
+def test_bundled_manifest_path_best_fit_below_version():
+    """`_bundled_manifest_path(agent_version=X)` returns the highest
+    agent_version ≤ X (best-fit), then highest revision within."""
+    from argit.setup import _bundled_manifest_path
+
+    # Pinning to "2026.4.14" should pick the highest revision of 2026.4.14
+    # even if a newer 2026.4.26 exists.
+    p = _bundled_manifest_path(agent_version="2026.4.14")
+    _, ver, _ = parse_filename(p.name)
+    assert ver == "2026.4.14"
+
+
+def test_bundled_manifest_path_no_eligible_raises():
+    """Requesting a version older than every shipped manifest raises."""
+    from argit.setup import _bundled_manifest_path
+
+    with pytest.raises(ArgitError) as exc:
+        _bundled_manifest_path(agent_version="2020.1.1")
+    assert "at or below" in str(exc.value)
 
 
 def test_two_manifests(tmp_path):
@@ -142,13 +166,43 @@ def test_secret_with_dir_source_rejected(tmp_path):
     assert "directory" in str(exc.value).lower()
 
 
-def test_wildcard_in_sanitize_path_rejected(tmp_path):
+def test_wildcard_whole_segment_in_sanitize_path_accepted(tmp_path):
+    """Single whole-segment `*` is now supported — expansion happens at
+    sanitize-time, one rule per matched key. The parse-time guards now
+    only reject malformed wildcards (partial/multi/leading)."""
     body = json.loads(BUNDLED.read_text())
     body["sanitize"][0]["rules"].append({"path": ".profiles.*.token"})
     repo = _init_repo(tmp_path, body, BUNDLED.name)
+    m = load_manifest(repo)
+    paths = [r.path for r in m.sanitize[0].rules]
+    assert ".profiles.*.token" in paths
+
+
+def test_wildcard_partial_segment_in_sanitize_path_rejected(tmp_path):
+    body = json.loads(BUNDLED.read_text())
+    body["sanitize"][0]["rules"].append({"path": ".profiles.foo*.token"})
+    repo = _init_repo(tmp_path, body, BUNDLED.name)
     with pytest.raises(ArgitError) as exc:
         load_manifest(repo)
-    assert "wildcard" in str(exc.value).lower()
+    assert "whole segment" in str(exc.value).lower()
+
+
+def test_wildcard_multi_in_sanitize_path_rejected(tmp_path):
+    body = json.loads(BUNDLED.read_text())
+    body["sanitize"][0]["rules"].append({"path": ".profiles.*.*.token"})
+    repo = _init_repo(tmp_path, body, BUNDLED.name)
+    with pytest.raises(ArgitError) as exc:
+        load_manifest(repo)
+    assert "at most one" in str(exc.value).lower()
+
+
+def test_wildcard_leading_in_sanitize_path_rejected(tmp_path):
+    body = json.loads(BUNDLED.read_text())
+    body["sanitize"][0]["rules"].append({"path": ".*.token"})
+    repo = _init_repo(tmp_path, body, BUNDLED.name)
+    with pytest.raises(ArgitError) as exc:
+        load_manifest(repo)
+    assert "first segment" in str(exc.value).lower()
 
 
 def test_bad_octal_mode_rejected(tmp_path):

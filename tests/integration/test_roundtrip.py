@@ -132,3 +132,42 @@ def test_full_roundtrip(tmp_path, monkeypatch, ephemeral_gpg_key, gnupg_home):
 
     # AC 16: scratch root is mode 0700
     assert oct(scratch.stat().st_mode & 0o777) == "0o700"
+
+
+def test_roundtrip_missing_secret_source_does_not_fail_verify(
+    tmp_path, monkeypatch, ephemeral_gpg_key, gnupg_home,
+):
+    """A `kind: secret` whose source is absent at backup time must skip
+    BOTH the backup write AND the restore-side verify check. Earlier
+    behavior emitted "pass entry missing — skipping" at restore but then
+    failed verify on the same item, contradicting itself."""
+    home = tmp_path / "home"; home.mkdir()
+    repo = tmp_path / "repo"; repo.mkdir()
+    git_init_repo(repo)
+
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "GNUPGHOME": str(gnupg_home),
+    }
+
+    fpr = ephemeral_gpg_key
+    source = home / ".openclaw"
+    _build_fixture(source)
+    # Simulate the operator-doesn't-use-github-copilot case from production:
+    # the manifest declares the secret, but the source file is absent.
+    (source / "credentials/github-copilot.token.json").unlink()
+    _setup_repo(repo, fpr, env)
+
+    cp = _argit(["backup"], cwd=repo, env=env)
+    assert cp.returncode == 0, f"backup stdout={cp.stdout}\nstderr={cp.stderr}"
+    assert "secret source missing: credentials/github-copilot.token.json" in cp.stderr
+
+    scratch = tmp_path / "scratch"
+    cp = _argit(["restore", "--target", str(scratch)], cwd=repo, env=env)
+    assert cp.returncode == 0, f"restore stdout={cp.stdout}\nstderr={cp.stderr}"
+    # Restore-time skip warning fires…
+    assert "pass entry missing: argit/openclaw/credentials/github-copilot.token" in cp.stderr
+    # …but verify does NOT re-flag the same path.
+    assert "verify failed" not in cp.stderr
+    assert "✗" not in cp.stderr

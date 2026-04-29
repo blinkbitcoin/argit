@@ -26,10 +26,12 @@ from .shared import (
     acquire_lock,
     check_lfs_filter_configured,
     in_progress_marker,
+    probe_agent_version,
     require_binary,
     require_git_repo,
     require_python,
     require_supported_platform,
+    version_cmp,
 )
 
 PASS_INIT_TIMEOUT_SEC = 30
@@ -53,30 +55,58 @@ def _already(message: str) -> None:
     click.echo(f"= {message}")
 
 
-def _bundled_manifest_path(agent_type: str = "openclaw", agent_version: str = "2026.4.14") -> Path:
-    """Return the highest-revision bundled manifest for a given
-    (agent_type, agent_version). Older revisions remain shipped for audit
-    trail and as the hash catalog QS4 (issue #1) will consume.
+def _bundled_manifest_path(agent_type: str = "openclaw", agent_version: str | None = None) -> Path:
+    """Return the bundled manifest to use.
+
+    `agent_version=None`: latest available across all versions (highest
+    `agent_version`, then highest `revision` within that). Used when no live
+    agent version is detectable.
+
+    `agent_version="2026.4.26"`: best-fit — highest `agent_version` ≤
+    requested, then highest revision. So an operator running OpenClaw
+    2026.4.26 with no exact-match manifest gets the most recent older one
+    (e.g. 2026.4.14-7) rather than something targeting a future schema.
+
+    Older revisions remain shipped for the hash catalog (drift detection)
+    and audit trail.
+
+    Raises if no manifest exists at or below `agent_version` (caller can
+    fall back to None to install latest, or fail loudly).
     """
     pkg = resources.files("argit.manifest_templates")
-    prefix = f"{agent_type}-{agent_version}-"
+    prefix = f"{agent_type}-"
     suffix = ".manifest.json"
-    candidates: list[tuple[int, Path]] = []
+    candidates: list[tuple[str, int, Path]] = []
     for entry in pkg.iterdir():
         name = entry.name
-        if name.startswith(prefix) and name.endswith(suffix):
-            rev_str = name[len(prefix):-len(suffix)]
-            try:
-                rev = int(rev_str)
-            except ValueError:
-                continue
-            candidates.append((rev, Path(str(entry))))
+        if not (name.startswith(prefix) and name.endswith(suffix)):
+            continue
+        body = name[len(prefix):-len(suffix)]
+        ver, _, rev_str = body.rpartition("-")
+        if not ver or not rev_str:
+            continue
+        try:
+            rev = int(rev_str)
+        except ValueError:
+            continue
+        candidates.append((ver, rev, Path(str(entry))))
     if not candidates:
         raise ArgitError(
-            f"no bundled manifest found for {agent_type}-{agent_version}",
+            f"no bundled manifests found for {agent_type}",
             "verify the argit installation; manifest templates should ship inside the package",
         )
-    return max(candidates)[1]
+    pool = candidates if agent_version is None else [
+        c for c in candidates if version_cmp(c[0], agent_version) <= 0
+    ]
+    if not pool:
+        raise ArgitError(
+            f"no bundled manifest found for {agent_type} at or below version {agent_version}",
+            "all shipped manifests target a newer agent — upgrade the agent or downgrade argit",
+        )
+    # Sort by (agent_version, revision); version_cmp gives the dotted-numeric
+    # ordering, revision is a plain int tiebreak.
+    pool.sort(key=lambda c: ([int(p) for p in c[0].split("-", 1)[0].split(".") if p.isdigit()], c[1]))
+    return pool[-1][2]
 
 
 def _all_bundled_manifest_paths() -> list[Path]:
@@ -215,9 +245,9 @@ def _cleanup_stale_upgrade_files(manifest_dir: Path, yes: bool, dry_run: bool) -
                 )
 
 
-def _ensure_manifest(repo_root: Path, dry_run: bool) -> bool:
+def _ensure_manifest(repo_root: Path, dry_run: bool, *, agent_version: str | None = None) -> bool:
     manifest_dir = repo_root / ".argit" / "manifest"
-    bundled = _bundled_manifest_path()
+    bundled = _bundled_manifest_path(agent_version=agent_version)
     target = manifest_dir / bundled.name
     # Skip if ANY openclaw manifest revision is already present — repos pinned
     # to an older revision keep that pin until QS4 (issue #1) ships a proper
@@ -457,12 +487,17 @@ def _run_pass_init(repo_root: Path, agent_fpr: str, dry_run: bool) -> None:
 
 def _handle_drift(
     repo_root: Path, *, yes: bool, no_upgrade_manifest: bool, dry_run: bool,
+    agent_version: str | None = None,
 ) -> None:
     """Classify and (conditionally) act on manifest drift.
 
     Runs BEFORE any load_manifest call (F2): a pre-spec-02 or otherwise
     grammar-incompatible manifest must still be reachable by the upgrade
     path — the classifier is hash-only.
+
+    `agent_version` (if probed) targets the best-fit manifest for the live
+    agent — operators on an older agent shouldn't be told to "upgrade" to a
+    manifest that targets a newer schema they can't yet use.
     """
     manifest_dir = repo_root / ".argit" / "manifest"
     _cleanup_stale_upgrade_files(manifest_dir, yes=yes, dry_run=dry_run)
@@ -480,7 +515,7 @@ def _handle_drift(
     repo_manifest_path = existing[0]
 
     drift, matched_rev = _classify_drift(repo_manifest_path)
-    bundled = _bundled_manifest_path()
+    bundled = _bundled_manifest_path(agent_version=agent_version)
 
     if drift == "clean":
         _already(f"manifest drift: clean ({repo_manifest_path.name})")
@@ -649,6 +684,13 @@ def run_setup(repo_root: Path, *, yes: bool, agent_key: str | None,
               no_upgrade_manifest: bool = False, dry_run: bool) -> None:
     _raise_on_preflight_failures(_collect_preflight_failures(repo_root))
 
+    # Probe the live agent version once and thread it through so
+    # `_bundled_manifest_path` can pick a best-fit manifest for whatever
+    # agent version is actually installed. None on every probe failure
+    # (binary missing, timeout, garbled output) — `_bundled_manifest_path`
+    # then falls back to "latest available", matching pre-probe behavior.
+    agent_version = probe_agent_version("openclaw")
+
     # Serialize concurrent `argit setup` invocations so .gitattributes and
     # .gitignore appends don't race. Lock acquisition itself is harmless in
     # dry-run too.
@@ -656,10 +698,11 @@ def run_setup(repo_root: Path, *, yes: bool, agent_key: str | None,
         # Drift classification + upgrade MUST run before any load_manifest
         # call (F2). The classifier is hash-only and reachable even when
         # the existing manifest has an unparseable grammar.
-        _handle_drift(repo_root, yes=yes, no_upgrade_manifest=no_upgrade_manifest, dry_run=dry_run)
-        _ensure_manifest(repo_root, dry_run)
+        _handle_drift(repo_root, yes=yes, no_upgrade_manifest=no_upgrade_manifest,
+                      dry_run=dry_run, agent_version=agent_version)
+        _ensure_manifest(repo_root, dry_run, agent_version=agent_version)
         _ensure_gitignore(repo_root, dry_run)
-        agent_type = _read_agent_type(_bundled_manifest_path())
+        agent_type = _read_agent_type(_bundled_manifest_path(agent_version=agent_version))
         _ensure_gitattributes(repo_root, agent_type, dry_run)
         _ensure_secrets_dir(repo_root, dry_run)
 

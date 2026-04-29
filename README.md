@@ -1,5 +1,7 @@
 # argit — per-user agent backup & restore
 
+<img src="docs/image.png" width="40%" alt="argit">
+
 `argit` is a standalone Python CLI that backs up and restores a per-user agent's
 state into a git repository. Secrets live in a repo-local `pass` store (dual-recipient
 encrypted with the operator's GPG key + an IT backup key); sanitized config and state

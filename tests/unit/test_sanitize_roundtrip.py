@@ -69,12 +69,81 @@ def test_mixed_leaf_and_subtree():
     assert restored == config
 
 
-def test_wildcard_path_rejected():
-    config = {"profiles": {"a": {"token": "x"}}}
-    rules = [SanitizeRule(".profiles.*.token", "p/x")]
+def test_wildcard_expands_to_concrete_rules():
+    """Single whole-segment `*` expands at sanitize-time to one rule per
+    matched key, each with its own pass_path (wildcard substituted)."""
+    config = {
+        "channels": {
+            "telegram": {
+                "accounts": {
+                    "default": {"botToken": "tok-d", "allowFrom": "x"},
+                    "erbot": {"botToken": "tok-e"},
+                }
+            }
+        }
+    }
+    rules = [SanitizeRule(
+        path=".channels.telegram.accounts.*.botToken",
+        pass_path="argit/openclaw/openclaw/channels/telegram/accounts/*/bot-token",
+    )]
+    sanitized, extracted, skipped = sanitize(config, rules)
+    assert skipped == []
+    assert extracted == {
+        "argit/openclaw/openclaw/channels/telegram/accounts/default/bot-token": "tok-d",
+        "argit/openclaw/openclaw/channels/telegram/accounts/erbot/bot-token": "tok-e",
+    }
+    # Non-secret keys remain visible in the sanitized JSON.
+    assert sanitized["channels"]["telegram"]["accounts"]["default"]["allowFrom"] == "x"
+    # Round-trip restores the original.
+    restored = reinject(sanitized, lookup_factory(extracted))
+    assert restored == config
+
+
+def test_wildcard_zero_matches_skipped():
+    """Wildcard against missing prefix OR empty dict at wildcard depth →
+    skipped, not raised. Mirrors the missing-fixed-path behavior."""
+    rule = SanitizeRule(
+        ".channels.telegram.accounts.*.botToken",
+        "argit/openclaw/openclaw/channels/telegram/accounts/*/bot-token",
+    )
+    # Missing prefix entirely.
+    _, extracted, skipped = sanitize({"channels": {"slack": {}}}, [rule])
+    assert extracted == {}
+    assert len(skipped) == 1
+    # Empty dict at wildcard depth.
+    _, extracted, skipped = sanitize({"channels": {"telegram": {"accounts": {}}}}, [rule])
+    assert extracted == {}
+    assert len(skipped) == 1
+
+
+def test_wildcard_prefix_not_dict_raises():
+    """If the segment before `*` resolves to a non-dict (author bug), raise
+    rather than skip — `accounts: []` is a manifest/config schema violation
+    we want surfaced, not silently swallowed."""
+    config = {"channels": {"telegram": {"accounts": []}}}
+    rule = SanitizeRule(
+        ".channels.telegram.accounts.*.botToken",
+        "argit/openclaw/openclaw/channels/telegram/accounts/*/bot-token",
+    )
     with pytest.raises(ArgitError) as exc:
-        sanitize(config, rules)
-    assert "wildcard" in str(exc.value).lower()
+        sanitize(config, [rule])
+    assert "object" in str(exc.value).lower()
+
+
+def test_wildcard_with_subtree():
+    """`*` at the leaf with subtree=true: each match becomes its own subtree
+    pass entry, JSON-serialized."""
+    config = {"profiles": {"a": {"k": "v1"}, "b": {"k": "v2"}}}
+    rule = SanitizeRule(
+        ".profiles.*",
+        "argit/openclaw/openclaw/profiles/*",
+        subtree=True,
+    )
+    sanitized, extracted, _ = sanitize(config, [rule])
+    assert json.loads(extracted["argit/openclaw/openclaw/profiles/a"]) == {"k": "v1"}
+    assert json.loads(extracted["argit/openclaw/openclaw/profiles/b"]) == {"k": "v2"}
+    restored = reinject(sanitized, lookup_factory(extracted))
+    assert restored == config
 
 
 def test_missing_path_returned_as_skipped():

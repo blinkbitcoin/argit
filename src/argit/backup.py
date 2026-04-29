@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import re
 import shutil
 import socket
 import subprocess
@@ -34,14 +33,15 @@ from .passwrap import PassWrap
 from .sanitize import sanitize as run_sanitize
 from .shared import (
     EXIT_OK,
+    VERSION_CHECK_TIMEOUT_SEC,
     acquire_lock,
     check_no_partial_state,
     in_progress_marker,
     matches_exclude,
     run_preflight,
+    version_cmp,
+    version_parseable,
 )
-
-VERSION_CHECK_TIMEOUT_SEC = 5
 
 
 # ---------- helpers ----------
@@ -193,7 +193,13 @@ def _warn_on_bundled_drift(repo_root: Path, manifest: Manifest) -> None:
 
 
 def _version_check(manifest: Manifest) -> None:
-    """Probe `openclaw --version`, warn on mismatch (never fail)."""
+    """Probe `openclaw --version`, warn on mismatch (never fail).
+
+    Keeps per-failure-mode diagnostics (timeout, non-zero exit, empty output,
+    no parseable token) so operators see WHY the version comparison was
+    skipped — versus a silent miss. Selection-side uses `probe_agent_version`
+    in shared.py which collapses all failures to None.
+    """
     if shutil.which("openclaw") is None:
         return
     try:
@@ -211,45 +217,18 @@ def _version_check(manifest: Manifest) -> None:
     if not raw:
         _warn("openclaw --version produced no output; skipping comparison")
         return
-    # OpenClaw prints `OpenClaw <ver> (<commit>)`; older/alternate builds
-    # print bare `<ver>` or `v<ver>`. Scan for the first parseable token
-    # rather than assuming position 0 — position 0 is the program name in
-    # the current format.
     token = next(
-        (t for t in (candidate.lstrip("v") for candidate in raw) if _version_parseable(t)),
+        (t for t in (candidate.lstrip("v") for candidate in raw) if version_parseable(t)),
         None,
     )
     if token is None:
         _warn(f"openclaw --version returned '{' '.join(raw)}' (no parseable version token); skipping comparison")
         return
-    cmp = _version_cmp(token, manifest.agent_version)
+    cmp = version_cmp(token, manifest.agent_version)
     if cmp > 0:
         _warn(f"OpenClaw {token} newer than manifest {manifest.agent_version}. New fields may not be backed up. Check for an updated argit release.")
     elif cmp < 0:
         _warn(f"OpenClaw {token} older than manifest {manifest.agent_version}. Fields defined in the manifest but missing in this install will be skipped silently.")
-
-
-_VER_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*(?:-[0-9A-Za-z.]+)?$")
-
-
-def _version_parseable(s: str) -> bool:
-    return bool(_VER_RE.match(s))
-
-
-def _version_cmp(a: str, b: str) -> int:
-    """Component-wise compare of dotted-numeric versions (ignore -<build> suffix)."""
-    def parts(v: str) -> list[int]:
-        head = v.split("-", 1)[0]
-        return [int(x) for x in head.split(".") if x.isdigit()]
-    pa, pb = parts(a), parts(b)
-    n = max(len(pa), len(pb))
-    pa += [0] * (n - len(pa))
-    pb += [0] * (n - len(pb))
-    if pa < pb:
-        return -1
-    if pa > pb:
-        return 1
-    return 0
 
 
 # ---------- main entry ----------

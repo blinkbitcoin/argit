@@ -25,15 +25,54 @@ PLACEHOLDER_RE = re.compile(r"^\$\{pass:(?P<path>[^}]+)\}$")
 
 
 def _split_path(dotted: str) -> list[str]:
-    if "*" in dotted:
-        raise ArgitError(
-            f"sanitize path '{dotted}' contains wildcard '*'",
-            "wildcards are unsupported; store the whole file as kind: secret instead",
-        )
     s = dotted.lstrip(".")
     if not s:
         raise ArgitError(f"sanitize path '{dotted}' is empty", "use a non-empty dotted path")
     return s.split(".")
+
+
+def _expand_wildcards(rule: SanitizeRule, config: Any) -> list[SanitizeRule]:
+    """Expand a wildcard rule into N concrete rules — one per matched key at
+    the wildcard depth. Zero matches returns []; the caller treats that as a
+    skip (same path as a missing fixed-path rule).
+
+    Wildcard semantics (parse-time validates form; this expands at runtime):
+      - At most one `*` per path; `*` is a whole segment; not the first segment.
+      - The prefix leading up to `*` must resolve to a dict in `config`. A
+        missing prefix returns [] (skipped — same as fixed-path missing).
+      - Both `path` and `pass_path` are rewritten in lockstep — `derive_pass`
+        passes a `*` segment through camelCase-to-kebab unchanged, so the
+        wildcard sits at the same offset in both representations.
+    """
+    parts = _split_path(rule.path)
+    if "*" not in parts:
+        return [rule]
+    star_idx = parts.index("*")
+    cur: Any = config
+    for p in parts[:star_idx]:
+        if not isinstance(cur, dict) or p not in cur:
+            return []
+        cur = cur[p]
+    if not isinstance(cur, dict):
+        raise ArgitError(
+            f"sanitize path '{rule.path}': prefix before '*' resolves to a "
+            f"{type(cur).__name__}, not an object",
+            "the segment before '*' must address a JSON object whose keys are enumerated",
+        )
+    pp_parts = rule.pass_path.split("/")
+    star_pp_idx = pp_parts.index("*")
+    out: list[SanitizeRule] = []
+    for key in cur:
+        new_parts = parts.copy()
+        new_parts[star_idx] = key
+        new_pp = pp_parts.copy()
+        new_pp[star_pp_idx] = key
+        out.append(SanitizeRule(
+            path="." + ".".join(new_parts),
+            pass_path="/".join(new_pp),
+            subtree=rule.subtree,
+        ))
+    return out
 
 
 def resolve(obj: Any, dotted_path: str) -> Any:
@@ -77,7 +116,17 @@ def sanitize(config: dict, rules: list[SanitizeRule]) -> tuple[dict, dict[str, s
     out = copy.deepcopy(config)
     extracted: dict[str, str] = {}
     skipped: list[SanitizeRule] = []
+    expanded: list[SanitizeRule] = []
     for rule in rules:
+        if "*" in rule.path:
+            matches = _expand_wildcards(rule, out)
+            if not matches:
+                skipped.append(rule)
+                continue
+            expanded.extend(matches)
+        else:
+            expanded.append(rule)
+    for rule in expanded:
         try:
             value = resolve(out, rule.path)
         except KeyError:
