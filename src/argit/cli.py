@@ -51,6 +51,16 @@ def doctor_cmd(ctx: click.Context, dry_run: bool) -> None:
     sys.exit(code)
 
 
+@main.command("review")
+@click.option("--dry-run", is_flag=True, help="Print what would be written without writing the report file.")
+@click.pass_context
+def review_cmd(ctx: click.Context, dry_run: bool) -> None:
+    """Emit a flat list of uncovered paths in source_root as markdown (read-only)."""
+    from .review import run_review
+    code = run_review(ctx.obj["repo_root"], dry_run=dry_run)
+    sys.exit(code)
+
+
 @main.command("backup")
 @click.option("--commit", is_flag=True, help="Stage + commit (no push).")
 @click.option("--push", is_flag=True, help="Implies --commit, then `git push`.")
