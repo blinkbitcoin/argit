@@ -245,15 +245,17 @@ def _cleanup_stale_upgrade_files(manifest_dir: Path, yes: bool, dry_run: bool) -
                 )
 
 
-def _ensure_manifest(repo_root: Path, dry_run: bool, *, agent_version: str | None = None) -> bool:
+def _ensure_manifest(
+    repo_root: Path, dry_run: bool, *, agent_type: str = "openclaw",
+    agent_version: str | None = None,
+) -> bool:
     manifest_dir = repo_root / ".argit" / "manifest"
-    bundled = _bundled_manifest_path(agent_version=agent_version)
+    bundled = _bundled_manifest_path(agent_type=agent_type, agent_version=agent_version)
     target = manifest_dir / bundled.name
-    # Skip if ANY openclaw manifest revision is already present — repos pinned
-    # to an older revision keep that pin until QS4 (issue #1) ships a proper
-    # upgrade flow. Copying the bundled file alongside an existing different
-    # revision would create two manifests in `.argit/manifest/` and break the
-    # "exactly one manifest per repo" invariant on the next argit invocation.
+    # Skip if ANY manifest revision is already present. Copying the bundled
+    # file alongside an existing different revision would create two manifests
+    # in `.argit/manifest/` and break the "exactly one manifest per repo"
+    # invariant on the next argit invocation.
     existing = sorted(manifest_dir.glob("*.manifest.json")) if manifest_dir.is_dir() else []
     if existing:
         names = ", ".join(p.name for p in existing)
@@ -487,7 +489,7 @@ def _run_pass_init(repo_root: Path, agent_fpr: str, dry_run: bool) -> None:
 
 def _handle_drift(
     repo_root: Path, *, yes: bool, no_upgrade_manifest: bool, dry_run: bool,
-    agent_version: str | None = None,
+    agent_type: str = "openclaw", agent_version: str | None = None,
 ) -> None:
     """Classify and (conditionally) act on manifest drift.
 
@@ -513,9 +515,15 @@ def _handle_drift(
     # (per Copilot's suggestion in PR #5) is a spec question — filed as
     # a follow-up issue.
     repo_manifest_path = existing[0]
+    existing_type, _, _ = parse_filename(repo_manifest_path.name)
+    if existing_type != agent_type:
+        raise ArgitError(
+            f"repo manifest is for {existing_type}, but setup requested {agent_type}",
+            "use the matching --agent-type or initialize a separate backup repo for this agent",
+        )
 
     drift, matched_rev = _classify_drift(repo_manifest_path)
-    bundled = _bundled_manifest_path(agent_version=agent_version)
+    bundled = _bundled_manifest_path(agent_type=agent_type, agent_version=agent_version)
 
     if drift == "clean":
         _already(f"manifest drift: clean ({repo_manifest_path.name})")
@@ -680,7 +688,7 @@ def _raise_on_preflight_failures(problems: list[tuple[str, str]]) -> None:
     )
 
 
-def run_setup(repo_root: Path, *, yes: bool, agent_key: str | None,
+def run_setup(repo_root: Path, *, yes: bool, agent_key: str | None, agent_type: str = "openclaw",
               no_upgrade_manifest: bool = False, dry_run: bool) -> None:
     _raise_on_preflight_failures(_collect_preflight_failures(repo_root))
 
@@ -689,7 +697,7 @@ def run_setup(repo_root: Path, *, yes: bool, agent_key: str | None,
     # agent version is actually installed. None on every probe failure
     # (binary missing, timeout, garbled output) — `_bundled_manifest_path`
     # then falls back to "latest available", matching pre-probe behavior.
-    agent_version = probe_agent_version("openclaw")
+    agent_version = probe_agent_version("openclaw") if agent_type == "openclaw" else None
 
     # Serialize concurrent `argit setup` invocations so .gitattributes and
     # .gitignore appends don't race. Lock acquisition itself is harmless in
@@ -699,11 +707,14 @@ def run_setup(repo_root: Path, *, yes: bool, agent_key: str | None,
         # call (F2). The classifier is hash-only and reachable even when
         # the existing manifest has an unparseable grammar.
         _handle_drift(repo_root, yes=yes, no_upgrade_manifest=no_upgrade_manifest,
+                      agent_type=agent_type,
                       dry_run=dry_run, agent_version=agent_version)
-        _ensure_manifest(repo_root, dry_run, agent_version=agent_version)
+        _ensure_manifest(repo_root, dry_run, agent_type=agent_type, agent_version=agent_version)
         _ensure_gitignore(repo_root, dry_run)
-        agent_type = _read_agent_type(_bundled_manifest_path(agent_version=agent_version))
-        _ensure_gitattributes(repo_root, agent_type, dry_run)
+        manifest_agent_type = _read_agent_type(
+            _bundled_manifest_path(agent_type=agent_type, agent_version=agent_version)
+        )
+        _ensure_gitattributes(repo_root, manifest_agent_type, dry_run)
         _ensure_secrets_dir(repo_root, dry_run)
 
         gpg = GpgWrap()

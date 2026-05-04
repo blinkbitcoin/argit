@@ -29,6 +29,22 @@ def _manifest(agent_version: str = "2026.3.28") -> Manifest:
     )
 
 
+def _hermes_manifest() -> Manifest:
+    return Manifest(
+        schema_version=1,
+        agent_type="hermes",
+        agent_version="2026.5.4",
+        manifest_revision=1,
+        source_root="/tmp",
+        source_root_mode="0700",
+        sanitize=[],
+        items=[],
+        exclude=[],
+        lifecycle=None,
+        filename="hermes-2026.5.4-1.manifest.json",
+    )
+
+
 def _mock_run(stdout: str, returncode: int = 0):
     def _fn(*_args, **_kwargs):
         return subprocess.CompletedProcess(
@@ -71,3 +87,13 @@ def test_version_parse_finds_version_token(
         assert expected_warning_fragment in joined, (
             f"expected substring '{expected_warning_fragment}' in: {joined}"
         )
+
+
+def test_version_check_skips_non_openclaw_manifest():
+    warnings: list[str] = []
+    with patch("argit.backup.shutil.which", return_value="/usr/bin/openclaw"):
+        with patch("argit.backup.subprocess.run") as run:
+            with patch("argit.backup._warn", side_effect=lambda m: warnings.append(m)):
+                _version_check(_hermes_manifest())
+    run.assert_not_called()
+    assert warnings == []

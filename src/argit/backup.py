@@ -120,6 +120,8 @@ def _version_check(manifest: Manifest) -> None:
     skipped — versus a silent miss. Selection-side uses `probe_agent_version`
     in shared.py which collapses all failures to None.
     """
+    if manifest.agent_type != "openclaw":
+        return
     if shutil.which("openclaw") is None:
         return
     try:

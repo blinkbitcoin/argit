@@ -107,14 +107,13 @@ def test_all_bundled_revisions_parse_cleanly(tmp_path):
         assert m.filename == path.name
 
 
-def test_bundled_manifest_path_picks_latest_across_versions():
-    """`_bundled_manifest_path()` (no agent_version) returns the latest
-    available across ALL agent_versions: highest agent_version, then highest
-    revision within that version."""
+def test_bundled_manifest_path_picks_latest_openclaw_by_default():
+    """`_bundled_manifest_path()` defaults to OpenClaw and returns the latest
+    available OpenClaw agent_version, then highest revision within it."""
     from argit.setup import _all_bundled_manifest_paths, _bundled_manifest_path
 
     latest = _bundled_manifest_path()
-    all_revisions = _all_bundled_manifest_paths()
+    all_revisions = [p for p in _all_bundled_manifest_paths() if p.name.startswith("openclaw-")]
     # Build (version_tuple, rev) keys and assert `latest` has the max.
     def _vkey(name):
         _, ver, rev = parse_filename(name)
@@ -132,6 +131,14 @@ def test_bundled_manifest_path_best_fit_below_version():
     p = _bundled_manifest_path(agent_version="2026.4.14")
     _, ver, _ = parse_filename(p.name)
     assert ver == "2026.4.14"
+
+
+def test_bundled_manifest_path_selects_hermes_agent_type():
+    from argit.setup import _bundled_manifest_path
+
+    p = _bundled_manifest_path(agent_type="hermes")
+    agent_type, ver, rev = parse_filename(p.name)
+    assert (agent_type, ver, rev) == ("hermes", "2026.5.4", 1)
 
 
 def test_bundled_manifest_path_no_eligible_raises():

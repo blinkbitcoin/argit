@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "argit"
-version = "1.7.0"
-description = "Per-user agent backup/restore CLI (OpenClaw MVP)"
+version = "1.8.0"
+description = "Per-user agent backup/restore CLI"
 requires-python = ">=3.10"
 authors = [{ name = "Blink", email = "engineering@blinkbtc.com" }]
 license = { text = "MIT" }
