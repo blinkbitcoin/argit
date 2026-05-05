@@ -315,41 +315,49 @@ def _read_agent_type(bundled_manifest: Path) -> str:
 
 
 def _ensure_gitattributes(repo_root: Path, agent_type: str, dry_run: bool) -> None:
-    lfs_line = path_conventions.LFS_LINE_TEMPLATE.format(agent_type=agent_type)
-    lfs_pattern = path_conventions.LFS_PATTERN_TEMPLATE.format(agent_type=agent_type)
+    expected = {
+        pattern: line
+        for pattern, line in zip(
+            path_conventions.lfs_patterns(agent_type),
+            path_conventions.lfs_lines(agent_type),
+            strict=True,
+        )
+    }
     ga = repo_root / ".gitattributes"
     existing = ga.read_text(encoding="utf-8") if ga.exists() else ""
     crlf = "\r\n" in existing
     eol = "\r\n" if crlf else "\n"
-    has_pattern_line = False
-    has_exact = False
-    differing_lines: list[str] = []
+    exact: set[str] = set()
+    differing_lines: dict[str, list[str]] = {pattern: [] for pattern in expected}
     for raw in existing.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        if line.split()[0] == lfs_pattern:
-            has_pattern_line = True
-            if line == lfs_line:
-                has_exact = True
+        pattern = line.split()[0]
+        if pattern in expected:
+            if line == expected[pattern]:
+                exact.add(pattern)
             else:
-                differing_lines.append(line)
-    if has_exact:
-        _already(".gitattributes already has the LFS line")
+                differing_lines[pattern].append(line)
+    if len(exact) == len(expected):
+        _already(".gitattributes already has the LFS lines")
         return
-    if has_pattern_line and not has_exact:
-        click.echo(
-            f"! .gitattributes has a different filter for `{lfs_pattern}` — review manually:\n  {differing_lines}",
-            err=True,
-        )
+    for pattern, lines in differing_lines.items():
+        if pattern not in exact and lines:
+            click.echo(
+                f"! .gitattributes has a different filter for `{pattern}` — review manually:\n  {lines}",
+                err=True,
+            )
+    missing_lines = [line for pattern, line in expected.items() if pattern not in exact and not differing_lines[pattern]]
+    if not missing_lines:
         return
     if dry_run:
-        _emit(True, f"append to .gitattributes: {lfs_line}")
+        _emit(True, f"append to .gitattributes: {missing_lines}")
         return
     needs_leading_nl = bool(existing) and not existing.endswith(("\n", "\r\n"))
-    block = (eol if needs_leading_nl else "") + lfs_line + eol
+    block = (eol if needs_leading_nl else "") + eol.join(missing_lines) + eol
     ga.write_text(existing + block, encoding="utf-8")
-    _emit(False, f"appended LFS line to .gitattributes")
+    _emit(False, "appended LFS line(s) to .gitattributes")
 
 
 def _ensure_secrets_dir(repo_root: Path, dry_run: bool) -> None:

@@ -69,11 +69,13 @@ def _check_gitattributes(repo_root: Path, manifest: Manifest | None) -> CheckFn:
                 ".gitattributes LFS check needs a loadable manifest",
                 "run `argit setup` to install a manifest first",
             )
-        pattern = path_conventions.LFS_PATTERN_TEMPLATE.format(agent_type=manifest.agent_type)
+        patterns = path_conventions.lfs_patterns(manifest.agent_type)
         ga = repo_root / ".gitattributes"
-        if not ga.is_file() or pattern not in ga.read_text(encoding="utf-8"):
+        body = ga.read_text(encoding="utf-8") if ga.is_file() else ""
+        missing = [pattern for pattern in patterns if pattern not in body]
+        if missing:
             raise ArgitError(
-                f".gitattributes missing the LFS line for {pattern}",
+                f".gitattributes missing LFS line(s) for {missing}",
                 "run `argit setup`",
             )
     return _fn

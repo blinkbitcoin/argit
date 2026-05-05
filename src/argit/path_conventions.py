@@ -19,8 +19,17 @@ from .errors import ArgitError
 
 BLOB_BACKEND = "git-lfs"
 
-LFS_LINE_TEMPLATE = "{agent_type}/blob/** filter=lfs diff=lfs merge=lfs -text"
-LFS_PATTERN_TEMPLATE = "{agent_type}/blob/**"
+LFS_MANAGED_KINDS = ("blob", "sqlite")
+LFS_LINE_TEMPLATE = "{agent_type}/{kind}/** filter=lfs diff=lfs merge=lfs -text"
+LFS_PATTERN_TEMPLATE = "{agent_type}/{kind}/**"
+
+
+def lfs_lines(agent_type: str) -> list[str]:
+    return [LFS_LINE_TEMPLATE.format(agent_type=agent_type, kind=kind) for kind in LFS_MANAGED_KINDS]
+
+
+def lfs_patterns(agent_type: str) -> list[str]:
+    return [LFS_PATTERN_TEMPLATE.format(agent_type=agent_type, kind=kind) for kind in LFS_MANAGED_KINDS]
 
 _KIND_DEFAULT_MODE = {
     "secret": "0600",
