@@ -11,6 +11,8 @@
     "gateway_state.json",
     "hermes-agent/",
     "image_cache/",
+    "memory_store.db-shm",
+    "memory_store.db-wal",
     "models_dev_cache.json",
     "state.db-shm",
     "state.db-wal"
@@ -50,6 +52,10 @@
     },
     {
       "kind": "data",
+      "source": "scripts/"
+    },
+    {
+      "kind": "data",
       "source": "pairing/"
     },
     {
@@ -61,12 +67,20 @@
       "source": "state.db"
     },
     {
+      "kind": "sqlite",
+      "source": "memory_store.db"
+    },
+    {
       "kind": "blob",
       "source": "skills/"
     },
     {
       "kind": "blob",
       "source": "sessions/"
+    },
+    {
+      "kind": "blob",
+      "source": "workspace/"
     }
   ],
   "lifecycle": {
