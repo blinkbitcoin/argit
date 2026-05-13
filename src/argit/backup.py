@@ -44,6 +44,8 @@ from .shared import (
     walk_relative,
 )
 
+GIT_REMOTE_INFO_FILENAME = ".argit-git-remote-info.md"
+
 
 # ---------- helpers ----------
 
@@ -57,6 +59,138 @@ def _warn(msg: str) -> None:
 
 def _check_chmod(path: Path, mode: str) -> None:
     path.chmod(int(mode, 8))
+
+
+def _redact_remote_url(url: str) -> str:
+    """Remove credential-bearing URL userinfo before writing remote hints.
+
+    `https://token@github.com/org/repo.git` and
+    `https://user:token@github.com/org/repo.git` both become
+    `https://<redacted>@github.com/org/repo.git`. SCP-like SSH remotes such
+    as `git@github.com:org/repo.git` are left untouched.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    if not parts.netloc or "@" not in parts.netloc:
+        return url
+    host = parts.hostname or parts.netloc.rsplit("@", 1)[-1]
+    if parts.port is not None:
+        host = f"{host}:{parts.port}"
+    return urlunsplit((parts.scheme, f"<redacted>@{host}", parts.path, parts.query, parts.fragment))
+
+
+def _run_git_metadata(repo: Path, args: list[str]) -> str | None:
+    cp = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    if cp.returncode != 0:
+        return None
+    return cp.stdout.strip()
+
+
+def _nested_git_repos(src: Path) -> list[Path]:
+    repos: list[Path] = []
+    for git_path in sorted(src.rglob(".git")):
+        if git_path.is_dir() or git_path.is_file():
+            repos.append(git_path.parent)
+    return repos
+
+
+def _nested_git_remote_info(src: Path, repo: Path) -> str:
+    rel = repo.relative_to(src).as_posix() or "."
+    remotes_raw = _run_git_metadata(repo, ["remote", "-v"])
+    branch = _run_git_metadata(repo, ["branch", "--show-current"])
+    head = _run_git_metadata(repo, ["rev-parse", "HEAD"])
+    status = _run_git_metadata(repo, ["status", "--short"])
+
+    remote_lines: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    if remotes_raw:
+        for line in remotes_raw.splitlines():
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            name, url = parts[0], _redact_remote_url(parts[1])
+            key = (name, url)
+            if key in seen:
+                continue
+            seen.add(key)
+            remote_lines.append(f"- `{name}`: `{url}`")
+    if not remote_lines:
+        remote_lines.append("- No remotes found or Git metadata could not be read.")
+
+    status_lines = [f"- `{line}`" for line in status.splitlines()] if status else ["- Clean or unavailable."]
+    branch_text = branch or "(detached or unavailable)"
+    head_text = head or "(unavailable)"
+    return "\n".join([
+        "# Nested Git Remote Info",
+        "",
+        "Argit does not back up nested `.git/` directories inside blob items.",
+        "This file records enough information to recreate the repository metadata manually.",
+        "",
+        f"- Nested path: `{rel}`",
+        f"- Branch: `{branch_text}`",
+        f"- HEAD: `{head_text}`",
+        "",
+        "## Remotes",
+        "",
+        *remote_lines,
+        "",
+        "## Status At Backup",
+        "",
+        *status_lines,
+        "",
+        "## Manual Rehydrate Sketch",
+        "",
+        "Review the restored working tree before running commands that may overwrite files.",
+        "",
+        "```sh",
+        "git init",
+        "git remote add <name> <url>",
+        "git fetch <name>",
+        "# git checkout <branch-or-sha>",
+        "```",
+        "",
+    ])
+
+
+def _ignore_git_dirs(_dir: str, names: list[str]) -> set[str]:
+    return {name for name in names if name == ".git"}
+
+
+def _chmod_and_retry(func, path: str, _exc_info) -> None:
+    Path(path).chmod(0o700)
+    func(path)
+
+
+def _remove_stale_nested_git_dirs(tgt: Path) -> None:
+    if not tgt.exists():
+        return
+    for git_path in sorted(tgt.rglob(".git"), key=lambda p: len(p.parts), reverse=True):
+        if git_path.is_symlink():
+            git_path.unlink()
+        elif git_path.is_dir():
+            shutil.rmtree(git_path, onerror=_chmod_and_retry)
+        else:
+            git_path.chmod(0o600)
+            git_path.unlink()
+
+
+def _copy_blob_tree(src: Path, tgt: Path) -> None:
+    nested_repos = _nested_git_repos(src)
+    _remove_stale_nested_git_dirs(tgt)
+    tgt.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, tgt, dirs_exist_ok=True, symlinks=True, ignore=_ignore_git_dirs)
+    for repo in nested_repos:
+        rel = repo.relative_to(src)
+        info_dir = tgt / rel
+        info_dir.mkdir(parents=True, exist_ok=True)
+        (info_dir / GIT_REMOTE_INFO_FILENAME).write_text(
+            _nested_git_remote_info(src, repo),
+            encoding="utf-8",
+        )
 
 
 def _warn_on_bundled_drift(repo_root: Path, manifest: Manifest) -> None:
@@ -309,8 +443,7 @@ def run_backup(repo_root: Path, *, commit: bool, push: bool, strict: bool, dry_r
                 if dry_run:
                     _emit(True, f"copytree {it.source} → {it.target} (LFS)")
                     continue
-                tgt.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(src, tgt, dirs_exist_ok=True, symlinks=True)
+                _copy_blob_tree(src, tgt)
                 _emit(False, f"blob: {it.source} → {it.target} (LFS)")
 
             # last-backup metadata (written before --commit so the recorded
