@@ -1,0 +1,114 @@
+{
+  "agent_type": "hermes",
+  "agent_version": "2026.5.4",
+  "exclude": [
+    ".skills_prompt_snapshot.json",
+    ".update_check",
+    "audio_cache/",
+    "auth.lock",
+    "bin/tirith",
+    "gateway.pid",
+    "gateway_state.json",
+    "hermes-agent/",
+    "image_cache/",
+    "memory_store.db-shm",
+    "memory_store.db-wal",
+    "models_dev_cache.json",
+    "sessions/",
+    "state.db-shm",
+    "state.db-wal"
+  ],
+  "items": [
+    {
+      "kind": "secret",
+      "source": ".env"
+    },
+    {
+      "kind": "secret",
+      "source": "auth.json"
+    },
+    {
+      "kind": "data",
+      "source": "config.yaml"
+    },
+    {
+      "kind": "data",
+      "source": "SOUL.md"
+    },
+    {
+      "kind": "data",
+      "source": "channel_directory.json"
+    },
+    {
+      "kind": "data",
+      "source": "memories/"
+    },
+    {
+      "kind": "data",
+      "source": "hooks/"
+    },
+    {
+      "kind": "data",
+      "source": "cron/"
+    },
+    {
+      "kind": "data",
+      "source": "scripts/"
+    },
+    {
+      "kind": "data",
+      "source": "pairing/"
+    },
+    {
+      "kind": "data",
+      "source": "whatsapp/"
+    },
+    {
+      "kind": "sqlite",
+      "source": "state.db"
+    },
+    {
+      "kind": "sqlite",
+      "source": "memory_store.db"
+    },
+    {
+      "kind": "blob",
+      "source": "skills/"
+    },
+    {
+      "kind": "blob",
+      "source": "workspace/"
+    }
+  ],
+  "lifecycle": {
+    "detect_running": {
+      "command": [
+        "sh",
+        "-c",
+        "command -v hermes >/dev/null 2>&1 && hermes gateway status >/dev/null 2>&1"
+      ],
+      "description": "Hermes gateway status reports a running gateway",
+      "running_exit_code": 0
+    },
+    "start": {
+      "command": [
+        "sh",
+        "-c",
+        "hermes gateway start 2>/dev/null || echo 'Could not auto-start Hermes gateway. Start manually, then run: argit doctor'"
+      ],
+      "description": "Start Hermes gateway"
+    },
+    "stop": {
+      "command": [
+        "sh",
+        "-c",
+        "hermes gateway stop"
+      ],
+      "description": "Stop Hermes gateway before live restore"
+    }
+  },
+  "manifest_revision": 1,
+  "sanitize": [],
+  "schema_version": 1,
+  "source_root": "~/.hermes"
+}

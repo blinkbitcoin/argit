@@ -15,6 +15,10 @@ from argit.setup import _bundled_manifest_path
 from argit.shared import IT_BACKUP_FPR
 
 BUNDLED = _bundled_manifest_path()
+OPENCLAW_LFS_LINES = (
+    "openclaw/blob/** filter=lfs diff=lfs merge=lfs -text\n"
+    "openclaw/sqlite/** filter=lfs diff=lfs merge=lfs -text\n"
+)
 
 
 def _stub_subprocess_run():
@@ -69,7 +73,7 @@ def test_doctor_fully_set_up_exits_zero(mock_gpg, tmp_path):
         mdir.mkdir(parents=True)
         (mdir / BUNDLED.name).write_text(BUNDLED.read_text())
         # gitattributes with LFS line
-        Path(cwd, ".gitattributes").write_text("openclaw/blob/** filter=lfs diff=lfs merge=lfs -text\n")
+        Path(cwd, ".gitattributes").write_text(OPENCLAW_LFS_LINES)
         # secrets/.gpg-id with single recipient
         secrets = Path(cwd, "secrets")
         secrets.mkdir()
@@ -95,7 +99,7 @@ def test_doctor_dual_recipient_with_it_key(mock_gpg, tmp_path):
         mdir = Path(cwd, ".argit", "manifest")
         mdir.mkdir(parents=True)
         (mdir / BUNDLED.name).write_text(BUNDLED.read_text())
-        Path(cwd, ".gitattributes").write_text("openclaw/blob/** filter=lfs diff=lfs merge=lfs -text\n")
+        Path(cwd, ".gitattributes").write_text(OPENCLAW_LFS_LINES)
         secrets = Path(cwd, "secrets")
         secrets.mkdir()
         (secrets / ".gpg-id").write_text(f"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n{IT_BACKUP_FPR}\n")
@@ -119,7 +123,7 @@ def test_doctor_lifecycle_preview(mock_gpg, tmp_path):
         mdir = Path(cwd, ".argit", "manifest")
         mdir.mkdir(parents=True)
         (mdir / BUNDLED.name).write_text(BUNDLED.read_text())
-        Path(cwd, ".gitattributes").write_text("openclaw/blob/** filter=lfs diff=lfs merge=lfs -text\n")
+        Path(cwd, ".gitattributes").write_text(OPENCLAW_LFS_LINES)
         secrets = Path(cwd, "secrets")
         secrets.mkdir()
         (secrets / ".gpg-id").write_text("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n")

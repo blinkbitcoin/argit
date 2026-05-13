@@ -359,6 +359,31 @@ Adding support for a new agent type (Hermes, Paperclip, a next-gen successor):
 9. **Ship.** Drop the manifest into `src/argit/manifest_templates/`. Bump
    `manifest_revision` if correcting an existing agent-version manifest.
 
+### Hermes sessions policy
+
+The bundled Hermes manifest intentionally excludes `sessions/` by default.
+Session JSONL transcripts power cross-session recall (`session_search`) but are
+not required for a functional disaster recovery restore: config, secrets,
+memories, workspace, skills, cron/scripts, pairing data, and SQLite/fact-store
+state are enough to boot an operational agent. On active instances, sessions can
+dominate backup size and push time.
+
+Operators who want transcript recall can opt in with a local overlay next to the
+bundled manifest, for example
+`.argit/manifest/hermes-2026.5.4-1.manifest.local.json`:
+
+```json
+{
+  "items": [
+    { "kind": "blob", "source": "sessions/" }
+  ]
+}
+```
+
+Other possible future treatments are an explicit optional tier in the manifest
+schema or a retention policy such as "last N days of sessions"; neither exists
+in schema version 1, so the current supported override is the overlay item.
+
 ---
 
 ## Example: full OpenClaw MVP manifest

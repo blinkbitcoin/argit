@@ -245,15 +245,17 @@ def _cleanup_stale_upgrade_files(manifest_dir: Path, yes: bool, dry_run: bool) -
                 )
 
 
-def _ensure_manifest(repo_root: Path, dry_run: bool, *, agent_version: str | None = None) -> bool:
+def _ensure_manifest(
+    repo_root: Path, dry_run: bool, *, agent_type: str = "openclaw",
+    agent_version: str | None = None,
+) -> bool:
     manifest_dir = repo_root / ".argit" / "manifest"
-    bundled = _bundled_manifest_path(agent_version=agent_version)
+    bundled = _bundled_manifest_path(agent_type=agent_type, agent_version=agent_version)
     target = manifest_dir / bundled.name
-    # Skip if ANY openclaw manifest revision is already present — repos pinned
-    # to an older revision keep that pin until QS4 (issue #1) ships a proper
-    # upgrade flow. Copying the bundled file alongside an existing different
-    # revision would create two manifests in `.argit/manifest/` and break the
-    # "exactly one manifest per repo" invariant on the next argit invocation.
+    # Skip if ANY manifest revision is already present. Copying the bundled
+    # file alongside an existing different revision would create two manifests
+    # in `.argit/manifest/` and break the "exactly one manifest per repo"
+    # invariant on the next argit invocation.
     existing = sorted(manifest_dir.glob("*.manifest.json")) if manifest_dir.is_dir() else []
     if existing:
         names = ", ".join(p.name for p in existing)
@@ -313,41 +315,49 @@ def _read_agent_type(bundled_manifest: Path) -> str:
 
 
 def _ensure_gitattributes(repo_root: Path, agent_type: str, dry_run: bool) -> None:
-    lfs_line = path_conventions.LFS_LINE_TEMPLATE.format(agent_type=agent_type)
-    lfs_pattern = path_conventions.LFS_PATTERN_TEMPLATE.format(agent_type=agent_type)
+    expected = {
+        pattern: line
+        for pattern, line in zip(
+            path_conventions.lfs_patterns(agent_type),
+            path_conventions.lfs_lines(agent_type),
+            strict=True,
+        )
+    }
     ga = repo_root / ".gitattributes"
     existing = ga.read_text(encoding="utf-8") if ga.exists() else ""
     crlf = "\r\n" in existing
     eol = "\r\n" if crlf else "\n"
-    has_pattern_line = False
-    has_exact = False
-    differing_lines: list[str] = []
+    exact: set[str] = set()
+    differing_lines: dict[str, list[str]] = {pattern: [] for pattern in expected}
     for raw in existing.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        if line.split()[0] == lfs_pattern:
-            has_pattern_line = True
-            if line == lfs_line:
-                has_exact = True
+        pattern = line.split()[0]
+        if pattern in expected:
+            if line == expected[pattern]:
+                exact.add(pattern)
             else:
-                differing_lines.append(line)
-    if has_exact:
-        _already(".gitattributes already has the LFS line")
+                differing_lines[pattern].append(line)
+    if len(exact) == len(expected):
+        _already(".gitattributes already has the LFS lines")
         return
-    if has_pattern_line and not has_exact:
-        click.echo(
-            f"! .gitattributes has a different filter for `{lfs_pattern}` — review manually:\n  {differing_lines}",
-            err=True,
-        )
+    for pattern, lines in differing_lines.items():
+        if pattern not in exact and lines:
+            click.echo(
+                f"! .gitattributes has a different filter for `{pattern}` — review manually:\n  {lines}",
+                err=True,
+            )
+    missing_lines = [line for pattern, line in expected.items() if pattern not in exact and not differing_lines[pattern]]
+    if not missing_lines:
         return
     if dry_run:
-        _emit(True, f"append to .gitattributes: {lfs_line}")
+        _emit(True, f"append to .gitattributes: {missing_lines}")
         return
     needs_leading_nl = bool(existing) and not existing.endswith(("\n", "\r\n"))
-    block = (eol if needs_leading_nl else "") + lfs_line + eol
+    block = (eol if needs_leading_nl else "") + eol.join(missing_lines) + eol
     ga.write_text(existing + block, encoding="utf-8")
-    _emit(False, f"appended LFS line to .gitattributes")
+    _emit(False, "appended LFS line(s) to .gitattributes")
 
 
 def _ensure_secrets_dir(repo_root: Path, dry_run: bool) -> None:
@@ -487,7 +497,7 @@ def _run_pass_init(repo_root: Path, agent_fpr: str, dry_run: bool) -> None:
 
 def _handle_drift(
     repo_root: Path, *, yes: bool, no_upgrade_manifest: bool, dry_run: bool,
-    agent_version: str | None = None,
+    agent_type: str = "openclaw", agent_version: str | None = None,
 ) -> None:
     """Classify and (conditionally) act on manifest drift.
 
@@ -513,9 +523,15 @@ def _handle_drift(
     # (per Copilot's suggestion in PR #5) is a spec question — filed as
     # a follow-up issue.
     repo_manifest_path = existing[0]
+    existing_type, _, _ = parse_filename(repo_manifest_path.name)
+    if existing_type != agent_type:
+        raise ArgitError(
+            f"repo manifest is for {existing_type}, but setup requested {agent_type}",
+            "use the matching --agent-type or initialize a separate backup repo for this agent",
+        )
 
     drift, matched_rev = _classify_drift(repo_manifest_path)
-    bundled = _bundled_manifest_path(agent_version=agent_version)
+    bundled = _bundled_manifest_path(agent_type=agent_type, agent_version=agent_version)
 
     if drift == "clean":
         _already(f"manifest drift: clean ({repo_manifest_path.name})")
@@ -680,7 +696,7 @@ def _raise_on_preflight_failures(problems: list[tuple[str, str]]) -> None:
     )
 
 
-def run_setup(repo_root: Path, *, yes: bool, agent_key: str | None,
+def run_setup(repo_root: Path, *, yes: bool, agent_key: str | None, agent_type: str = "openclaw",
               no_upgrade_manifest: bool = False, dry_run: bool) -> None:
     _raise_on_preflight_failures(_collect_preflight_failures(repo_root))
 
@@ -689,7 +705,7 @@ def run_setup(repo_root: Path, *, yes: bool, agent_key: str | None,
     # agent version is actually installed. None on every probe failure
     # (binary missing, timeout, garbled output) — `_bundled_manifest_path`
     # then falls back to "latest available", matching pre-probe behavior.
-    agent_version = probe_agent_version("openclaw")
+    agent_version = probe_agent_version("openclaw") if agent_type == "openclaw" else None
 
     # Serialize concurrent `argit setup` invocations so .gitattributes and
     # .gitignore appends don't race. Lock acquisition itself is harmless in
@@ -699,11 +715,14 @@ def run_setup(repo_root: Path, *, yes: bool, agent_key: str | None,
         # call (F2). The classifier is hash-only and reachable even when
         # the existing manifest has an unparseable grammar.
         _handle_drift(repo_root, yes=yes, no_upgrade_manifest=no_upgrade_manifest,
+                      agent_type=agent_type,
                       dry_run=dry_run, agent_version=agent_version)
-        _ensure_manifest(repo_root, dry_run, agent_version=agent_version)
+        _ensure_manifest(repo_root, dry_run, agent_type=agent_type, agent_version=agent_version)
         _ensure_gitignore(repo_root, dry_run)
-        agent_type = _read_agent_type(_bundled_manifest_path(agent_version=agent_version))
-        _ensure_gitattributes(repo_root, agent_type, dry_run)
+        manifest_agent_type = _read_agent_type(
+            _bundled_manifest_path(agent_type=agent_type, agent_version=agent_version)
+        )
+        _ensure_gitattributes(repo_root, manifest_agent_type, dry_run)
         _ensure_secrets_dir(repo_root, dry_run)
 
         gpg = GpgWrap()

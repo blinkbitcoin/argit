@@ -12,6 +12,8 @@ from argit.path_conventions import (
     derive_pass,
     derive_sanitize_target,
     invert_item_target,
+    lfs_lines,
+    lfs_patterns,
     targets_overlap,
     validate_glob_source,
 )
@@ -35,6 +37,14 @@ def test_default_mode(kind, expected):
 def test_default_mode_unknown_kind():
     with pytest.raises(ArgitError):
         default_mode("bogus")
+
+
+def test_lfs_conventions_cover_blobs_and_sqlite():
+    assert lfs_patterns("hermes") == ["hermes/blob/**", "hermes/sqlite/**"]
+    assert lfs_lines("hermes") == [
+        "hermes/blob/** filter=lfs diff=lfs merge=lfs -text",
+        "hermes/sqlite/** filter=lfs diff=lfs merge=lfs -text",
+    ]
 
 
 # ---------- derive_sanitize_target ----------

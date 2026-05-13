@@ -59,7 +59,9 @@ def test_setup_happy_path(tmp_path, gnupg_home, ephemeral_gpg_key):
     # AC 1: artifacts present (latest bundled revision)
     from argit.setup import _bundled_manifest_path
     assert (repo / ".argit" / "manifest" / _bundled_manifest_path().name).is_file()
-    assert "openclaw/blob/**" in (repo / ".gitattributes").read_text()
+    gitattributes = (repo / ".gitattributes").read_text()
+    assert "openclaw/blob/**" in gitattributes
+    assert "openclaw/sqlite/**" in gitattributes
     assert (repo / "secrets").is_dir()
     assert not (repo / "secrets" / ".gpg-id").exists()
     # IT key import would be attempted but the bundled .asc may collide with ephemeral key — verify presence regardless
