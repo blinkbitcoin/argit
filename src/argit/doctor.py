@@ -146,11 +146,14 @@ def _classify_manifest_drift(repo_root: Path) -> tuple[str, bool, str | None]:
     if state == "no_manifest":
         return ("manifest drift", True, None)  # manifest-missing row already covers this
     if state == "stale_bundle":
+        if payload["revisions_behind"] is not None:
+            gap = f"rev {payload['repo_revision']} → {payload['bundled_revision']}"
+        else:  # cross-version-family: revision numbers aren't comparable
+            gap = f"{payload['manifest_file']} → {payload['bundled_manifest_file']}"
         return (
             "manifest drift",
             True,
-            f"stale bundle: rev {payload['repo_revision']} → {payload['bundled_revision']} "
-            "available — run `argit setup` to upgrade",
+            f"stale bundle: {gap} available — run `argit setup` to upgrade",
         )
     return (
         "manifest drift",
