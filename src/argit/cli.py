@@ -1,6 +1,6 @@
 """argit CLI entry point.
 
-Click command group with four subcommands: setup, doctor, backup, restore.
+Click command group: setup, doctor, info, review, backup, restore.
 Top-level error handler renders ArgitError as the two-line first-touch
 message and exits with the appropriate code.
 """
@@ -51,6 +51,16 @@ def doctor_cmd(ctx: click.Context, dry_run: bool) -> None:
     """Diagnostic-only status report."""
     from .doctor import run_doctor
     code = run_doctor(ctx.obj["repo_root"])
+    sys.exit(code)
+
+
+@main.command("info")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON instead of human-readable lines.")
+@click.pass_context
+def info_cmd(ctx: click.Context, as_json: bool) -> None:
+    """Print argit's bundled-resource paths + metadata (install-agnostic)."""
+    from .info import run_info
+    code = run_info(as_json=as_json)
     sys.exit(code)
 
 
