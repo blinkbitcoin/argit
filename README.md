@@ -133,7 +133,9 @@ dependency-free (never shells out to gpg), so it works identically under
 reconstruct install-layout-specific paths or `import argit` from a foreign
 interpreter. Reports the package root, the IT-backup pubkey path, the
 manifest-templates dir, the `hashes.json` catalog path, the declared
-IT-backup fingerprint/uid, and the list of bundled manifest templates.
+IT-backup fingerprint/uid, and the bundled manifest templates. Human mode
+prints the manifest-template *count*; the full list is emitted only in
+`--json` (under `manifest_templates`).
 
 Flags:
 
