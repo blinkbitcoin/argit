@@ -21,6 +21,7 @@ from .gpgwrap import GpgWrap
 from .hashing import canonical_hash
 from .manifest import parse_filename
 from .shared import (
+    _HEX_FPR_RE,
     IT_BACKUP_FPR,
     IT_BACKUP_UID,
     acquire_lock,
@@ -31,6 +32,7 @@ from .shared import (
     require_git_repo,
     require_python,
     require_supported_platform,
+    read_gpg_id,
     version_cmp,
 )
 
@@ -53,6 +55,10 @@ def _already(message: str) -> None:
     `would:` (dry-run will-do) and `✓` (just-did).
     """
     click.echo(f"= {message}")
+
+
+def _warn(message: str) -> None:
+    click.echo(f"! {message}", err=True)
 
 
 def _bundled_manifest_path(agent_type: str = "openclaw", agent_version: str | None = None) -> Path:
@@ -372,8 +378,35 @@ def _ensure_secrets_dir(repo_root: Path, dry_run: bool) -> None:
     _emit(False, f"created secrets/")
 
 
-def _import_it_key(gpg: GpgWrap, repo_root: Path, dry_run: bool, yes: bool) -> bool:
-    """Import the bundled IT backup public key + set ownertrust to Full.
+def _existing_gpg_id(repo_root: Path) -> bool:
+    gpg_id = repo_root / "secrets" / ".gpg-id"
+    if not gpg_id.is_file():
+        return False
+    lines = [ln.strip() for ln in gpg_id.read_text(encoding="utf-8").splitlines()]
+    return any(ln and not ln.startswith("#") for ln in lines)
+
+
+def _resolve_backup_recipient(it_recipient: str | None) -> tuple[str, bool]:
+    if it_recipient is None:
+        return IT_BACKUP_FPR, True
+    normalized = it_recipient.replace(" ", "").upper()
+    if len(normalized) != 40 or _HEX_FPR_RE.match(normalized) is None:
+        raise ArgitError(
+            f"--it-recipient {it_recipient} is not a 40-char GPG fingerprint",
+            "pass the full fingerprint: gpg --list-keys --with-colons | grep ^fpr",
+        )
+    return normalized, False
+
+
+def _ensure_backup_key(
+    gpg: GpgWrap,
+    repo_root: Path,
+    backup_fpr: str,
+    is_bundled_default: bool,
+    dry_run: bool,
+    yes: bool,
+) -> bool:
+    """Ensure the selected backup recipient is usable for non-interactive pass.
 
     `set_ownertrust` runs UNCONDITIONALLY (idempotent — re-setting to the
     same level is a no-op). If the key was imported via a previous argit
@@ -382,17 +415,25 @@ def _import_it_key(gpg: GpgWrap, repo_root: Path, dry_run: bool, yes: bool) -> b
     every encrypt — which hangs `pass insert` when there's no tty. Always
     asserting the trust level fixes those hosts on next `argit setup`.
     """
-    newly_imported = not gpg.is_key_imported(IT_BACKUP_FPR)
+    imported = gpg.is_key_imported(backup_fpr)
+    if not is_bundled_default and not imported:
+        raise ArgitError(
+            f"--it-recipient {backup_fpr} not in your GPG keyring",
+            "import the backup recipient's public key first: gpg --import <pubkey>.asc",
+        )
+    newly_imported = not imported
     if dry_run:
-        if newly_imported:
-            _emit(True, f"import IT backup key (fpr {IT_BACKUP_FPR}, uid '{IT_BACKUP_UID}')")
+        if is_bundled_default and newly_imported:
+            _emit(True, f"import IT backup key (fpr {backup_fpr}, uid '{IT_BACKUP_UID}')")
+        elif is_bundled_default:
+            _already(f"IT backup key already imported (fpr {backup_fpr})")
         else:
-            _already(f"IT backup key already imported (fpr {IT_BACKUP_FPR})")
-        _emit(True, f"set ownertrust Full (4) on {IT_BACKUP_FPR}")
+            _already(f"backup recipient already imported (fpr {backup_fpr})")
+        _emit(True, f"set ownertrust Full (4) on {backup_fpr}")
         return newly_imported
-    if newly_imported and not yes:
+    if is_bundled_default and newly_imported and not yes:
         click.echo(
-            f"Importing IT backup key (fpr {IT_BACKUP_FPR}, uid '{IT_BACKUP_UID}') "
+            f"Importing IT backup key (fpr {backup_fpr}, uid '{IT_BACKUP_UID}') "
             f"into your GPG keyring. Press Enter to continue, Ctrl-C to abort."
         )
         try:
@@ -402,19 +443,21 @@ def _import_it_key(gpg: GpgWrap, repo_root: Path, dry_run: bool, yes: bool) -> b
     # Mutation outside the backup repo — guard with the in-progress marker so
     # an interrupted import surfaces on the next run.
     with in_progress_marker(repo_root):
-        if newly_imported:
+        if is_bundled_default and newly_imported:
             asc = _bundled_it_key_path()
             gpg.import_key(asc)
-        # GPG ownertrust numerics: 4=Full, 5=Ultimate. The IT key is an
-        # external vendor key — Full, not Ultimate (Ultimate is for keys the
-        # operator controls). The tech-spec's "(5)" for Full inverts GPG's
-        # actual convention; we honor the intent (Full, not Ultimate).
-        gpg.set_ownertrust(IT_BACKUP_FPR, 4)
-    if newly_imported:
+        # GPG ownertrust numerics: 4=Full, 5=Ultimate. Backup recipients are
+        # external/vendor keys — Full, not Ultimate.
+        gpg.set_ownertrust(backup_fpr, 4)
+    if is_bundled_default and newly_imported:
         _emit(False, f"imported IT backup key + set ownertrust Full")
+    elif is_bundled_default:
+        _already(
+            f"IT backup key already imported (fpr {backup_fpr}) — re-asserted ownertrust Full"
+        )
     else:
         _already(
-            f"IT backup key already imported (fpr {IT_BACKUP_FPR}) — re-asserted ownertrust Full"
+            f"backup recipient already imported (fpr {backup_fpr}) — re-asserted ownertrust Full"
         )
     return newly_imported
 
@@ -450,7 +493,7 @@ def _detect_agent_key(gpg: GpgWrap, agent_key: str | None) -> str:
     return personal[0].fpr
 
 
-def _run_pass_init(repo_root: Path, agent_fpr: str, dry_run: bool) -> None:
+def _run_pass_init(repo_root: Path, agent_fpr: str, backup_fpr: str, dry_run: bool) -> None:
     """Initialize the repo-local pass store with the agent + IT backup
     recipients. Previously this was a copy-paste hint; argit now runs the
     command directly, now that preflight guarantees `pass`, `gpg`, and
@@ -462,7 +505,7 @@ def _run_pass_init(repo_root: Path, agent_fpr: str, dry_run: bool) -> None:
     secrets_dir = repo_root / "secrets"
     gpg_id = secrets_dir / ".gpg-id"
     cmd_display = (
-        f"cd secrets && PASSWORD_STORE_DIR=. pass init {agent_fpr} {IT_BACKUP_FPR}"
+        f"cd secrets && PASSWORD_STORE_DIR=. pass init {agent_fpr} {backup_fpr}"
     )
     if gpg_id.is_file():
         _already(f"pass store already initialized ({gpg_id.relative_to(repo_root)})")
@@ -473,7 +516,7 @@ def _run_pass_init(repo_root: Path, agent_fpr: str, dry_run: bool) -> None:
     env = {**os.environ, "PASSWORD_STORE_DIR": "."}
     try:
         subprocess.run(
-            ["pass", "init", agent_fpr, IT_BACKUP_FPR],
+            ["pass", "init", agent_fpr, backup_fpr],
             cwd=str(secrets_dir),
             env=env,
             check=True,
@@ -696,8 +739,8 @@ def _raise_on_preflight_failures(problems: list[tuple[str, str]]) -> None:
     )
 
 
-def run_setup(repo_root: Path, *, yes: bool, agent_key: str | None, agent_type: str = "openclaw",
-              no_upgrade_manifest: bool = False, dry_run: bool) -> None:
+def run_setup(repo_root: Path, *, yes: bool, agent_key: str | None, it_recipient: str | None = None,
+              agent_type: str = "openclaw", no_upgrade_manifest: bool = False, dry_run: bool) -> None:
     _raise_on_preflight_failures(_collect_preflight_failures(repo_root))
 
     # Probe the live agent version once and thread it through so
@@ -726,7 +769,56 @@ def run_setup(repo_root: Path, *, yes: bool, agent_key: str | None, agent_type: 
         _ensure_secrets_dir(repo_root, dry_run)
 
         gpg = GpgWrap()
-        _import_it_key(gpg, repo_root, dry_run, yes)
-        agent_fpr = _detect_agent_key(gpg, agent_key)
-        _emit(False, f"using agent GPG key: {agent_fpr}")
-        _run_pass_init(repo_root, agent_fpr, dry_run)
+        if _existing_gpg_id(repo_root):
+            recipients = read_gpg_id(repo_root / "secrets")
+            status = (
+                f"respecting existing secrets/.gpg-id ({len(recipients)} recipients); "
+                "skipping IT-key import + pass init"
+            )
+            if dry_run:
+                _emit(True, status)
+            else:
+                _already(status)
+            missing = []
+            malformed = []
+            for fpr in recipients:
+                normalized = fpr.replace(" ", "").upper()
+                if len(normalized) != 40 or _HEX_FPR_RE.match(normalized) is None:
+                    malformed.append(fpr)
+                uid = gpg.uid_for(fpr)
+                detail = f"  recipient {fpr}  ({uid if uid is not None else '<not in keyring>'})"
+                if dry_run:
+                    _emit(True, detail)
+                else:
+                    _already(detail)
+                if uid is None:
+                    missing.append(fpr)
+            if missing:
+                _warn(
+                    f"{len(missing)} recipient(s) in .gpg-id are not in your GPG "
+                    f"keyring: {', '.join(missing)}. `argit backup` will hang on "
+                    f"encryption until you import them. Run `argit doctor` to verify."
+                )
+            if malformed:
+                _warn(
+                    f"{len(malformed)} recipient(s) in .gpg-id are not full 40-character "
+                    f"GPG fingerprints: {', '.join(malformed)}. Setup is respecting the "
+                    "existing file; run `argit doctor` to verify before backup."
+                )
+            if len(recipients) < 2:
+                _warn(
+                    f"secrets/.gpg-id has {len(recipients)} recipient(s); expected at least "
+                    "2 (agent + backup). Setup is respecting the existing file, but "
+                    "`argit doctor` will report this as broken."
+                )
+        else:
+            backup_fpr, is_default = _resolve_backup_recipient(it_recipient)
+            agent_fpr = _detect_agent_key(gpg, agent_key)
+            if backup_fpr.upper() == agent_fpr.replace(" ", "").upper():
+                raise ArgitError(
+                    "--it-recipient must be different from the agent GPG key",
+                    "pass a separate backup/escrow recipient fingerprint",
+                )
+            _ensure_backup_key(gpg, repo_root, backup_fpr, is_default, dry_run, yes)
+            _emit(dry_run, f"using agent GPG key: {agent_fpr}")
+            _run_pass_init(repo_root, agent_fpr, backup_fpr, dry_run)

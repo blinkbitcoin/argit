@@ -27,6 +27,11 @@ class PassWrap:
     def _env(self) -> dict[str, str]:
         env = dict(os.environ)
         env["PASSWORD_STORE_DIR"] = str(self.store_dir)
+        # pass otherwise lets gpg prompt on untrusted backup recipients. Argit
+        # has already made .gpg-id explicit and doctor verifies key presence.
+        existing = env.get("PASSWORD_STORE_GPG_OPTS", "").strip()
+        trust_opt = "--trust-model always"
+        env["PASSWORD_STORE_GPG_OPTS"] = f"{existing} {trust_opt}".strip() if existing else trust_opt
         return env
 
     def _run(self, args: list[str], *, stdin: str | None = None,

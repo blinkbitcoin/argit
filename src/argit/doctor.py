@@ -24,6 +24,7 @@ from .shared import (
     IT_BACKUP_FPR,
     REQUIRED_PYTHON,
     check_lfs_filter_configured,
+    read_gpg_id,
     require_binary,
 )
 
@@ -81,13 +82,17 @@ def _check_gitattributes(repo_root: Path, manifest: Manifest | None) -> CheckFn:
     return _fn
 
 
-def _check_it_key(_gpg: GpgWrap) -> CheckFn:
+def _check_recipient_keys_present(_gpg: GpgWrap, repo_root: Path) -> CheckFn:
     def _fn() -> None:
-        if not _gpg.is_key_imported(IT_BACKUP_FPR):
-            raise ArgitError(
-                f"IT backup key {IT_BACKUP_FPR} not in your GPG keyring",
-                "run `argit setup`",
-            )
+        gpg_id = repo_root / "secrets" / ".gpg-id"
+        if not gpg_id.is_file():
+            return
+        for fpr in read_gpg_id(repo_root / "secrets"):
+            if not _gpg.is_key_imported(fpr):
+                raise ArgitError(
+                    f"recipient {fpr} from .gpg-id not in keyring",
+                    "import its public key or re-run argit setup",
+                )
     return _fn
 
 
@@ -108,31 +113,30 @@ def _check_gpg_id(repo_root: Path) -> CheckFn:
         if not gpg_id.is_file():
             raise ArgitError(
                 f"{gpg_id} not found (pass store not initialized)",
-                f"cd secrets && PASSWORD_STORE_DIR=. pass init <agent-fpr> {IT_BACKUP_FPR}",
+                "run `argit setup`",
             )
         lines = [ln.strip() for ln in gpg_id.read_text(encoding="utf-8").splitlines() if ln.strip() and not ln.strip().startswith("#")]
         if not lines:
             raise ArgitError(
                 f"{gpg_id} is empty",
-                f"cd secrets && PASSWORD_STORE_DIR=. pass init <agent-fpr> {IT_BACKUP_FPR}",
+                "cd secrets && PASSWORD_STORE_DIR=. pass init <agent-fpr> <backup-fpr>",
             )
     return _fn
 
 
 def _classify_gpg_id(repo_root: Path) -> tuple[str, bool, str | None]:
     """Recipient-count classification — produces an informational ✓/✗ line."""
-    gpg_id = repo_root / "secrets" / ".gpg-id"
-    if not gpg_id.is_file():
-        return ("recipient count", False, "run `argit setup` then `pass init`")
-    lines = [ln.strip() for ln in gpg_id.read_text(encoding="utf-8").splitlines() if ln.strip() and not ln.strip().startswith("#")]
-    if len(lines) == 1:
-        return ("recipient count", True, None)
-    if len(lines) == 2 and any(ln.upper().endswith(IT_BACKUP_FPR.upper()[-len(ln):]) for ln in lines):
+    try:
+        recipients = read_gpg_id(repo_root / "secrets")
+    except ArgitError:
+        return ("recipient count", False, "run `argit setup`")
+    if len(recipients) >= 2:
         return ("recipient count", True, None)
     return (
         "recipient count",
         False,
-        f"expected single-recipient OR dual-recipient including {IT_BACKUP_FPR}; got {len(lines)} entries",
+        f"expected >=2 recipients (agent + backup); got {len(recipients)}. Add a backup recipient: "
+        "cd secrets && PASSWORD_STORE_DIR=. pass init <agent-fpr> <backup-fpr>",
     )
 
 
@@ -187,7 +191,7 @@ def run_doctor(repo_root: Path) -> int:
     results.append(_check("cwd is git repo", _check_git_repo(repo_root)))
     results.append(_check("manifest in .argit/manifest/", _check_manifest(repo_root)))
     results.append(_check(".gitattributes has LFS line", _check_gitattributes(repo_root, manifest)))
-    results.append(_check("IT backup key imported", _check_it_key(gpg)))
+    results.append(_check(".gpg-id recipient keys present", _check_recipient_keys_present(gpg, repo_root)))
     results.append(_check("personal GPG key present", _check_personal_key(gpg)))
     results.append(_check("secrets/.gpg-id present + non-empty", _check_gpg_id(repo_root)))
     results.append(_classify_gpg_id(repo_root))

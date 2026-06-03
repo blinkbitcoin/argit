@@ -91,7 +91,7 @@ def _stub_setup_env(catalog: dict[str, str], agent_version: str = "2026.4.14"):
         stack.enter_context(patch("argit.setup._ensure_gitignore", lambda *a, **k: None))
         stack.enter_context(patch("argit.setup._ensure_gitattributes", lambda *a, **k: None))
         stack.enter_context(patch("argit.setup._ensure_secrets_dir", lambda *a, **k: None))
-        stack.enter_context(patch("argit.setup._import_it_key", lambda *a, **k: False))
+        stack.enter_context(patch("argit.setup._ensure_backup_key", lambda *a, **k: False))
         stack.enter_context(patch("argit.setup._detect_agent_key", lambda gpg, ak: "A" * 40))
         stack.enter_context(patch("argit.setup._run_pass_init", lambda *a, **k: None))
         stack.enter_context(patch("argit.setup._load_hash_catalog", return_value=catalog))

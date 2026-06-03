@@ -293,14 +293,14 @@ def read_gpg_id(secrets_dir: Path) -> list[str]:
     if not gpg_id.is_file():
         raise ArgitError(
             f"{gpg_id} not found (pass store not initialized)",
-            f"run: cd {secrets_dir.name} && PASSWORD_STORE_DIR=. pass init <agent-fpr> {IT_BACKUP_FPR}",
+            f"run `argit setup` or: cd {secrets_dir.name} && PASSWORD_STORE_DIR=. pass init <agent-fpr> <backup-fpr>",
         )
     lines = [ln.strip() for ln in gpg_id.read_text(encoding="utf-8").splitlines()]
     lines = [ln for ln in lines if ln and not ln.startswith("#")]
     if not lines:
         raise ArgitError(
             f"{gpg_id} is empty",
-            f"run: cd {secrets_dir.name} && PASSWORD_STORE_DIR=. pass init <agent-fpr> {IT_BACKUP_FPR}",
+            f"run: cd {secrets_dir.name} && PASSWORD_STORE_DIR=. pass init <agent-fpr> <backup-fpr>",
         )
     return lines
 

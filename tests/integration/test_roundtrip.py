@@ -34,6 +34,30 @@ def _build_fixture(target: Path) -> None:
     )
 
 
+def _generate_extra_key(gnupg_home: Path, name: str) -> str:
+    batch = f"""
+%no-protection
+Key-Type: RSA
+Key-Length: 2048
+Name-Real: {name}
+Name-Email: {name}@example.invalid
+Expire-Date: 0
+%commit
+"""
+    subprocess.run(
+        ["gpg", "--batch", "--pinentry-mode", "loopback", "--gen-key"],
+        input=batch, capture_output=True, text=True, timeout=120, check=True,
+        env={**os.environ, "GNUPGHOME": str(gnupg_home)},
+    )
+    cp = subprocess.run(
+        ["gpg", "--list-keys", "--with-colons"],
+        capture_output=True, text=True, check=True,
+        env={**os.environ, "GNUPGHOME": str(gnupg_home)},
+    )
+    fprs = [line.split(":")[9] for line in cp.stdout.splitlines() if line.startswith("fpr:")]
+    return fprs[-1]
+
+
 def _pass_init(secrets_dir: Path, fpr: str, env: dict[str, str]) -> None:
     pass_env = {**env, "PASSWORD_STORE_DIR": str(secrets_dir)}
     subprocess.run(["pass", "init", fpr], cwd=str(secrets_dir.parent), env=pass_env, check=True, capture_output=True)
@@ -132,6 +156,36 @@ def test_full_roundtrip(tmp_path, monkeypatch, ephemeral_gpg_key, gnupg_home):
 
     # AC 16: scratch root is mode 0700
     assert oct(scratch.stat().st_mode & 0o777) == "0o700"
+
+
+def test_byo_recipient_roundtrip_restores_plaintext(tmp_path, ephemeral_gpg_key, gnupg_home):
+    home = tmp_path / "home"; home.mkdir()
+    repo = tmp_path / "repo"; repo.mkdir()
+    git_init_repo(repo)
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "GNUPGHOME": str(gnupg_home),
+    }
+    source = home / ".openclaw"
+    _build_fixture(source)
+    original = (source / "openclaw.json").read_bytes()
+    foreign = _generate_extra_key(gnupg_home, "argit-roundtrip-foreign")
+
+    cp = _argit(
+        ["setup", "--yes", "--agent-key", ephemeral_gpg_key, "--it-recipient", foreign],
+        cwd=repo,
+        env=env,
+    )
+    assert cp.returncode == 0, f"setup stdout={cp.stdout}\nstderr={cp.stderr}"
+
+    cp = _argit(["backup"], cwd=repo, env=env)
+    assert cp.returncode == 0, f"backup stdout={cp.stdout}\nstderr={cp.stderr}"
+
+    scratch = tmp_path / "scratch"
+    cp = _argit(["restore", "--target", str(scratch)], cwd=repo, env=env)
+    assert cp.returncode == 0, f"restore stdout={cp.stdout}\nstderr={cp.stderr}"
+    assert (scratch / "openclaw.json").read_bytes() == original
 
 
 def test_roundtrip_missing_secret_source_does_not_fail_verify(
