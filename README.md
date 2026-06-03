@@ -96,8 +96,7 @@ gh repo clone blinkbitcoin/argit /tmp/argit && pipx install /tmp/argit
 ```sh
 curl -fsSL https://raw.githubusercontent.com/blinkbitcoin/argit/main/install.sh | bash
 mkdir openclaw-backup && cd openclaw-backup && git init
-argit setup                                              # copies manifest, .gitattributes, imports IT key, prints pass-init command
-cd secrets && PASSWORD_STORE_DIR=. pass init <agent-fpr> 1107BD74F292CD3EAB0CF59D49F2D3353A88D34E && cd ..
+argit setup                                              # copies manifest, .gitattributes, creates secrets/, runs pass init
 argit backup
 git add -A && git commit -m 'initial backup' && git push # or: argit backup --push on subsequent runs
 ```
@@ -109,14 +108,24 @@ git add -A && git commit -m 'initial backup' && git push # or: argit backup --pu
 One-time (idempotent) bootstrapping inside an existing git-init'd repo. Copies the
 bundled OpenClaw manifest, appends the git-lfs line to `.gitattributes`, creates
 `secrets/`, imports the bundled IT backup public key (after interactive confirmation
-unless `--yes`), and prints the exact `pass init` command for the operator to run.
+unless `--yes`), and runs `pass init` with the agent key plus a backup recipient.
+If `secrets/.gpg-id` already exists, setup respects that recipient list and skips
+IT-key import and `pass init`.
 
 Flags:
 
 - `--yes` — skip the IT-key-import confirmation.
 - `--agent-key <fpr>` — pick the operator's GPG fingerprint explicitly. **Required**
   when `gpg --list-keys` returns more than one non-IT key.
+- `--it-recipient <fpr>` — greenfield-only backup/escrow recipient fingerprint.
+  Defaults to the bundled IT-backup key. Ignored when `secrets/.gpg-id` exists.
 - `--dry-run` — print actions without executing.
+
+Argit treats `secrets/.gpg-id` as the encryption authority. During `backup` and
+`restore`, argit's repo-scoped `pass` calls set `--trust-model always` so GPG
+does not prompt on backup/escrow recipients in non-interactive runs. Use
+`argit doctor` to verify every `.gpg-id` recipient public key is present before
+running backups.
 
 ### `argit doctor`
 

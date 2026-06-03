@@ -44,6 +44,7 @@ def test_setup_dryrun_pristine(mock_gpg, tmp_path):
     assert "would: append to .gitattributes" in result.output
     assert "would: mkdir secrets/" in result.output
     assert "would: import IT backup key" in result.output
+    assert "would: using agent GPG key" in result.output
     assert "would: run: cd secrets" in result.output
     assert "pass init" in result.output
 

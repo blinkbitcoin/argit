@@ -47,6 +47,13 @@ def test_pass_has_timeout_surfaces_pinentry_hint(tmp_path):
     assert "pinentry" in str(exc.value).lower()
 
 
+def test_pass_env_forces_noninteractive_trust_model(tmp_path, monkeypatch):
+    monkeypatch.setenv("PASSWORD_STORE_GPG_OPTS", "--batch")
+    env = PassWrap(tmp_path / "secrets")._env()
+    assert env["PASSWORD_STORE_DIR"] == str(tmp_path / "secrets")
+    assert env["PASSWORD_STORE_GPG_OPTS"] == "--batch --trust-model always"
+
+
 def test_gpg_list_keys_timeout():
     g = GpgWrap()
     with patch("argit.gpgwrap.subprocess.run", side_effect=_raise_timeout):

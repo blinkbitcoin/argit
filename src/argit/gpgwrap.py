@@ -71,6 +71,13 @@ class GpgWrap:
                 return True
         return False
 
+    def uid_for(self, fpr: str) -> str | None:
+        target = fpr.replace(" ", "").upper()
+        for k in self.list_keys():
+            if k.fpr.upper() == target:
+                return (k.uids or [None])[0]
+        return None
+
     def import_key(self, asc_path: Path) -> None:
         if not asc_path.is_file():
             raise ArgitError(

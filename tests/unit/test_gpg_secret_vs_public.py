@@ -97,6 +97,13 @@ def test_is_key_imported_still_uses_public_keyring():
         assert g.is_key_imported("A" * 40) is True
 
 
+def test_uid_for_returns_primary_uid_or_none():
+    g = GpgWrap()
+    with patch("argit.gpgwrap.subprocess.run", side_effect=_fake_gpg):
+        assert g.uid_for("B" * 40) == "Colleague <colleague@example.com>"
+        assert g.uid_for("C" * 40) is None
+
+
 def test_list_secret_keys_parses_sec_records():
     """_parse_colons must accept `sec` records with the same field layout as
     `pub` (capability at field 11, fingerprint via following fpr record)."""

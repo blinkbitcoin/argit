@@ -63,12 +63,15 @@ def test_setup_happy_path(tmp_path, gnupg_home, ephemeral_gpg_key):
     assert "openclaw/blob/**" in gitattributes
     assert "openclaw/sqlite/**" in gitattributes
     assert (repo / "secrets").is_dir()
-    assert not (repo / "secrets" / ".gpg-id").exists()
+    gpg_id = repo / "secrets" / ".gpg-id"
+    assert gpg_id.is_file()
+    recipients = gpg_id.read_text().splitlines()
+    assert ephemeral_gpg_key in recipients
+    assert "1107BD74F292CD3EAB0CF59D49F2D3353A88D34E" in recipients
     # IT key import would be attempted but the bundled .asc may collide with ephemeral key — verify presence regardless
     cp_keys = subprocess.run(["gpg", "--list-keys", "--with-colons"], env=env, capture_output=True, text=True, check=True)
     assert "1107BD74F292CD3EAB0CF59D49F2D3353A88D34E" in cp_keys.stdout
-    # pass init hint printed
-    assert "PASSWORD_STORE_DIR=. pass init" in cp.stdout
+    assert "initialized pass store" in cp.stdout
 
 
 def test_setup_idempotent(tmp_path, gnupg_home, ephemeral_gpg_key):
@@ -84,7 +87,7 @@ def test_setup_idempotent(tmp_path, gnupg_home, ephemeral_gpg_key):
     assert "manifest already present" in cp2.stdout
     assert "already has the LFS line" in cp2.stdout
     assert "secrets/ already exists" in cp2.stdout
-    assert "IT backup key already imported" in cp2.stdout
+    assert "respecting existing secrets/.gpg-id (2 recipients)" in cp2.stdout
 
 
 def test_setup_multi_key_requires_agent_key(tmp_path, gnupg_home, ephemeral_gpg_key):
@@ -112,3 +115,66 @@ def test_setup_with_explicit_agent_key(tmp_path, gnupg_home, ephemeral_gpg_key):
     cp = _argit(["setup", "--yes", "--agent-key", second_fpr], cwd=repo, env=env)
     assert cp.returncode == 0, f"stdout={cp.stdout}\nstderr={cp.stderr}"
     assert second_fpr in cp.stdout
+
+
+def test_setup_greenfield_byo_it_recipient(tmp_path, gnupg_home, ephemeral_gpg_key):
+    repo = tmp_path / "repo"; repo.mkdir()
+    git_init_repo(repo)
+    env = {**os.environ, "GNUPGHOME": str(gnupg_home)}
+    foreign = _generate_extra_key(gnupg_home, "argit-foreign")
+
+    cp = _argit(
+        ["setup", "--yes", "--agent-key", ephemeral_gpg_key, "--it-recipient", foreign],
+        cwd=repo,
+        env=env,
+    )
+    assert cp.returncode == 0, f"stdout={cp.stdout}\nstderr={cp.stderr}"
+
+    recipients = (repo / "secrets" / ".gpg-id").read_text().splitlines()
+    assert recipients == [ephemeral_gpg_key, foreign]
+    cp_keys = subprocess.run(
+        ["gpg", "--list-keys", "--with-colons"],
+        env=env, capture_output=True, text=True, check=True,
+    )
+    assert "1107BD74F292CD3EAB0CF59D49F2D3353A88D34E" not in cp_keys.stdout
+    cp_trust = subprocess.run(
+        ["gpg", "--export-ownertrust"],
+        env=env, capture_output=True, text=True, check=True,
+    )
+    assert f"{foreign}:4:" in cp_trust.stdout
+
+
+def test_setup_greenfield_byo_missing_key_fails_without_gpg_id(tmp_path, gnupg_home, ephemeral_gpg_key):
+    repo = tmp_path / "repo"; repo.mkdir()
+    git_init_repo(repo)
+    env = {**os.environ, "GNUPGHOME": str(gnupg_home)}
+    missing = "C" * 40
+
+    cp = _argit(["setup", "--yes", "--it-recipient", missing], cwd=repo, env=env)
+    assert cp.returncode != 0
+    assert missing in cp.stderr
+    assert "gpg --import" in cp.stderr
+    assert not (repo / "secrets" / ".gpg-id").exists()
+
+
+def test_setup_respects_existing_foreign_gpg_id(tmp_path, gnupg_home, ephemeral_gpg_key):
+    repo = tmp_path / "repo"; repo.mkdir()
+    git_init_repo(repo)
+    env = {**os.environ, "GNUPGHOME": str(gnupg_home)}
+    foreign = _generate_extra_key(gnupg_home, "argit-existing-foreign")
+    secrets = repo / "secrets"
+    secrets.mkdir()
+    original = f"{ephemeral_gpg_key}\n{foreign}\n"
+    (secrets / ".gpg-id").write_text(original)
+
+    cp = _argit(["setup", "--yes"], cwd=repo, env=env)
+    assert cp.returncode == 0, f"stdout={cp.stdout}\nstderr={cp.stderr}"
+    assert (secrets / ".gpg-id").read_text() == original
+    assert "respecting existing secrets/.gpg-id (2 recipients)" in cp.stdout
+    assert ephemeral_gpg_key in cp.stdout
+    assert foreign in cp.stdout
+    cp_keys = subprocess.run(
+        ["gpg", "--list-keys", "--with-colons"],
+        env=env, capture_output=True, text=True, check=True,
+    )
+    assert "1107BD74F292CD3EAB0CF59D49F2D3353A88D34E" not in cp_keys.stdout
