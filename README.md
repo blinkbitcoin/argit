@@ -119,6 +119,9 @@ Flags:
   when `gpg --list-keys` returns more than one non-IT key.
 - `--it-recipient <fpr>` — greenfield-only backup/escrow recipient fingerprint.
   Defaults to the bundled IT-backup key. Ignored when `secrets/.gpg-id` exists.
+- `--no-upgrade-manifest` — don't prompt for bundled-manifest upgrades; drift is
+  still reported. Pin the in-repo revision and control upgrade timing yourself.
+  Query the pinned-vs-bundled gap with `argit drift --json` (below).
 - `--dry-run` — print actions without executing.
 
 Argit treats `secrets/.gpg-id` as the encryption authority. During `backup` and
@@ -154,6 +157,39 @@ Flags:
 # locate the bundled IT pubkey regardless of install method
 argit info --json | jq -r '.resources.it_backup_pubkey'
 ```
+
+### `argit drift`
+
+Reports whether the in-repo manifest matches the current bundled revision —
+the machine-readable companion to `setup --no-upgrade-manifest`. Read-only,
+non-mutating, and uses the same hash-only classifier `setup` does (no
+`load_manifest`, so a grammar-incompatible manifest still classifies). **Always
+exits 0** for any classified state — drift is a queryable condition, not a
+failure; only genuine errors (agent-type mismatch, malformed catalog) exit
+non-zero.
+
+`state` is one of `clean`, `stale_bundle` (an upgrade is available),
+`operator_modified` (hand-edited — left alone; extensions belong in
+`.manifest.local.json`), or `no_manifest`.
+
+Flags:
+
+- `--json` — emit one JSON-line object (drops into a JSON-lines event pipeline).
+- `--agent-type <type>` — manifest family to classify against (default `openclaw`).
+
+```bash
+# pin the manifest at install, then monitor the fleet for drift
+argit setup --yes --no-upgrade-manifest
+argit drift --json
+# {"schema":"argit.drift/v1","agent_type":"openclaw","state":"stale_bundle",
+#  "repo_revision":1,"bundled_revision":3,"revisions_behind":2,"upgrade_available":true}
+
+# alert when an instance falls behind
+test "$(argit drift --json | jq -r .revisions_behind)" = "0" || open-tracking-issue
+```
+
+`argit doctor` also surfaces a (non-failing) `manifest drift` line for at-a-glance
+checks; `argit drift --json` is the channel automation should parse.
 
 ### `argit backup`
 

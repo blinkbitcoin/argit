@@ -124,6 +124,42 @@ def _check_gpg_id(repo_root: Path) -> CheckFn:
     return _fn
 
 
+def _classify_manifest_drift(repo_root: Path) -> tuple[str, bool, str | None]:
+    """Informational bundled-vs-in-repo drift row. NEVER flips doctor's exit
+    code — drift (stale bundle / operator-modified) is a condition to report,
+    not a broken-health failure. Returns ok=True always; the remediation
+    string carries the drift detail so it prints under the ✓.
+
+    For a machine-readable channel use `argit drift --json` (issue #25); this
+    shares the same `collect_drift` core so the two never disagree.
+    """
+    from .drift import collect_drift
+
+    try:
+        payload = collect_drift(repo_root)
+    except ArgitError:
+        # agent-type mismatch / no bundled manifests — surfaced by other rows.
+        return ("manifest drift", True, None)
+    state = payload["state"]
+    if state == "clean":
+        return ("manifest up-to-date", True, None)
+    if state == "no_manifest":
+        return ("manifest drift", True, None)  # manifest-missing row already covers this
+    if state == "stale_bundle":
+        return (
+            "manifest drift",
+            True,
+            f"stale bundle: rev {payload['repo_revision']} → {payload['bundled_revision']} "
+            "available — run `argit setup` to upgrade",
+        )
+    return (
+        "manifest drift",
+        True,
+        f"operator-modified ({payload['manifest_file']}) — extensions belong in "
+        "`.manifest.local.json`; see MANIFEST.md §Overlay",
+    )
+
+
 def _classify_gpg_id(repo_root: Path) -> tuple[str, bool, str | None]:
     """Recipient-count classification — produces an informational ✓/✗ line."""
     try:
@@ -194,6 +230,7 @@ def run_doctor(repo_root: Path) -> int:
     results.append(_check(".gpg-id recipient keys present", _check_recipient_keys_present(gpg, repo_root)))
     results.append(_check("personal GPG key present", _check_personal_key(gpg)))
     results.append(_check("secrets/.gpg-id present + non-empty", _check_gpg_id(repo_root)))
+    results.append(_classify_manifest_drift(repo_root))
     results.append(_classify_gpg_id(repo_root))
     results.append(_push_auth_probe(repo_root))
 
@@ -201,6 +238,10 @@ def run_doctor(repo_root: Path) -> int:
     for name, ok, remediation in results:
         if ok:
             click.echo(f"✓ {name}")
+            # An ok row may still carry detail (informational rows like
+            # manifest drift) — print it as a note, not a remediation.
+            if remediation:
+                click.echo(f"  ℹ {remediation}")
         else:
             click.echo(f"✗ {name}")
             if remediation:
