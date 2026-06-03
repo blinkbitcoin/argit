@@ -125,6 +125,25 @@ any failure. Each failed check prints the exact remediation command. Also previe
 lifecycle commands declared in the manifest — useful for auditing what a restore
 would execute.
 
+### `argit info`
+
+Prints argit's bundled-resource locations + metadata. Repo-independent and
+dependency-free (never shells out to gpg), so it works identically under
+`pipx`, `uv tool`, `pip --user`, and source installs — no need to
+reconstruct install-layout-specific paths or `import argit` from a foreign
+interpreter. Reports the package root, the IT-backup pubkey path, the
+manifest-templates dir, the `hashes.json` catalog path, the declared
+IT-backup fingerprint/uid, and the list of bundled manifest templates.
+
+Flags:
+
+- `--json` — emit a stable machine-readable object (for orchestrators/CI).
+
+```bash
+# locate the bundled IT pubkey regardless of install method
+argit info --json | jq -r '.resources.it_backup_pubkey'
+```
+
 ### `argit backup`
 
 Reads the manifest, extracts sanitized secrets to the repo-local pass store,
