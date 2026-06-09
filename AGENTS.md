@@ -29,6 +29,7 @@ src/argit/
   backup.py             argit backup — source → repo
   restore.py            argit restore — repo → source
   doctor.py             argit doctor — diagnostics (read-only)
+  drift.py              argit drift — machine-readable manifest-drift report (read-only)
   manifest.py           Manifest parse + validate + overlay merge + glob expansion
   path_conventions.py   Forward/inverse target+pass derivation, glob grammar
   hashing.py            Canonical-hash helper (drift classifier input)

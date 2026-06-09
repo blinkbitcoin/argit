@@ -1,6 +1,6 @@
 """argit CLI entry point.
 
-Click command group: setup, doctor, info, review, backup, restore.
+Click command group: setup, doctor, info, drift, review, backup, restore.
 Top-level error handler renders ArgitError as the two-line first-touch
 message and exits with the appropriate code.
 """
@@ -65,6 +65,18 @@ def info_cmd(ctx: click.Context, as_json: bool) -> None:
     """Print argit's bundled-resource paths + metadata (install-agnostic)."""
     from .info import run_info
     code = run_info(as_json=as_json)
+    sys.exit(code)
+
+
+@main.command("drift")
+@click.option("--json", "as_json", is_flag=True, help="Emit a machine-readable JSON object instead of a human-readable line.")
+@click.option("--agent-type", "agent_type", default="openclaw", show_default=True,
+              help="Bundled agent manifest family to classify against.")
+@click.pass_context
+def drift_cmd(ctx: click.Context, as_json: bool, agent_type: str) -> None:
+    """Report bundled-vs-in-repo manifest drift (read-only). Always exits 0."""
+    from .drift import run_drift
+    code = run_drift(ctx.obj["repo_root"], as_json=as_json, agent_type=agent_type)
     sys.exit(code)
 
 

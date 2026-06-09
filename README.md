@@ -119,6 +119,9 @@ Flags:
   when `gpg --list-keys` returns more than one non-IT key.
 - `--it-recipient <fpr>` — greenfield-only backup/escrow recipient fingerprint.
   Defaults to the bundled IT-backup key. Ignored when `secrets/.gpg-id` exists.
+- `--no-upgrade-manifest` — don't prompt for bundled-manifest upgrades; drift is
+  still reported. Pin the in-repo revision and control upgrade timing yourself.
+  Query the pinned-vs-bundled gap with `argit drift --json` (below).
 - `--dry-run` — print actions without executing.
 
 Argit treats `secrets/.gpg-id` as the encryption authority. During `backup` and
@@ -154,6 +157,46 @@ Flags:
 # locate the bundled IT pubkey regardless of install method
 argit info --json | jq -r '.resources.it_backup_pubkey'
 ```
+
+### `argit drift`
+
+Reports whether the in-repo manifest matches the **currently selected bundled
+manifest** — the machine-readable companion to `setup --no-upgrade-manifest`.
+Read-only, non-mutating, and hash-only (no `load_manifest`, so a
+grammar-incompatible manifest still classifies). **Always exits 0** for any
+classified state — drift is a queryable condition, not a failure; only genuine
+errors (agent-type mismatch, malformed catalog) exit non-zero.
+
+`state` is one of `clean`, `stale_bundle` (an upgrade is available),
+`operator_modified` (hand-edited — left alone; extensions belong in
+`.manifest.local.json`), or `no_manifest`. The report compares the repo
+manifest against the selected bundled one (not merely the latest revision
+within the repo manifest's own version family), so a repo pinned to the newest
+revision of an *older* version family is correctly reported as stale.
+`revisions_behind` is an integer for same-family rev-bumps and `null` across
+version families (revision numbers reset per family) — branch on
+`upgrade_available` (a boolean) for a family-agnostic signal.
+
+Flags:
+
+- `--json` — emit one JSON-line object (drops into a JSON-lines event pipeline).
+- `--agent-type <type>` — manifest family to classify against (default `openclaw`).
+
+```bash
+# pin the manifest at install, then monitor the fleet for drift
+argit setup --yes --no-upgrade-manifest
+argit drift --json
+# {"schema":"argit.drift/v1","agent_type":"openclaw","manifest_file":"openclaw-2026.4.14-1.manifest.json",
+#  "repo_agent_version":"2026.4.14","repo_revision":1,"state":"stale_bundle",
+#  "bundled_manifest_file":"openclaw-2026.4.14-3.manifest.json","bundled_agent_version":"2026.4.14",
+#  "bundled_revision":3,"revisions_behind":2,"upgrade_available":true}
+
+# alert when an instance is behind (works across version families)
+test "$(argit drift --json | jq -r .upgrade_available)" = "false" || open-tracking-issue
+```
+
+`argit doctor` also surfaces a (non-failing) `manifest drift` line for at-a-glance
+checks; `argit drift --json` is the channel automation should parse.
 
 ### `argit backup`
 
