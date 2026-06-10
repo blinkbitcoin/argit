@@ -537,7 +537,13 @@ def _git_commit(
     for it in concrete_items:
         if it.kind == "secret":
             continue  # secret is in secrets/, added below
-        if it.target:
+        # Stage only targets that were actually written. An item whose source
+        # is absent on this agent is skipped during copy (§4-7), so its target
+        # never exists; staging it anyway makes `git add` abort the whole backup
+        # with "pathspec '<target>' did not match any files". This happens
+        # whenever the live agent lacks a path the bundled manifest declares
+        # (e.g. a 2026.5.4 manifest against a 2026.5.7 Hermes build).
+        if it.target and (repo_root / it.target).exists():
             paths_to_add.append(it.target)
     for sf in manifest.sanitize:
         paths_to_add.append(sf.target)

@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from argit.backup import _git_commit
-from argit.manifest import Manifest
+from argit.manifest import Item, Manifest
 
 
 def _empty_manifest() -> Manifest:
@@ -87,3 +87,31 @@ def test_git_commit_omits_review_path_when_none(capsys, tmp_path):
     )
     captured = capsys.readouterr()
     assert ".argit/reviews/" not in captured.out
+
+
+def test_git_commit_skips_items_with_missing_target(capsys, tmp_path):
+    """An item whose source was absent is skipped during copy, so its target is
+    never written. _git_commit must NOT stage that target — otherwise `git add`
+    fails with "pathspec did not match any files" and aborts the whole backup.
+    (Reproduces a 2026.5.4 manifest declaring scripts/ against a Hermes build
+    that has no ~/.hermes/scripts/.)"""
+    repo = tmp_path / "repo"
+    (repo / "hermes" / "data").mkdir(parents=True)
+    # present: copied this run, target exists on disk
+    present_tgt = repo / "hermes" / "data" / "config.yaml"
+    present_tgt.write_text("model: x\n")
+    present = Item(kind="data", source="config.yaml", mode="0644",
+                   target="hermes/data/config.yaml")
+    # missing: source absent → skipped during copy → target never written
+    missing = Item(kind="data", source="scripts/", mode="0755",
+                   target="hermes/data/scripts/")
+
+    _git_commit(
+        repo, _empty_manifest(),
+        concrete_items=[present, missing], iso="2026-06-10T00:00:00Z",
+        dry=True, review_path=None,
+    )
+
+    out = capsys.readouterr().out
+    assert "hermes/data/config.yaml" in out
+    assert "hermes/data/scripts/" not in out
