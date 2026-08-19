@@ -86,8 +86,8 @@ class PassWrap:
     def insert(self, pass_path: str, value: str) -> None:
         """Idempotent insert: skip the write when the existing value matches.
 
-        Mirrors bot-provisioning-poc/inject_secret.sh — strip trailing
-        newlines on both sides before comparison so re-runs don't churn.
+        Strips trailing newlines on both sides before comparison so re-runs
+        don't churn.
         """
         if self.has(pass_path):
             existing = self.show(pass_path)
