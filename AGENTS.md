@@ -169,11 +169,11 @@ failed) + **remediation** (what the operator should do). Construct it that way.
 
 ## Spec reference
 
-The multi-track tech-spec driving recent work:
-`/Users/kim/src/blink-specs/.claude/worktrees/kn+argit-localisations/argit/implementation-artifacts/tech-spec-argit-manifest-handling.md`
-
-Tracks D (conventions) / A (hash catalog + drift) / C (overlay) / B (globs) are
-all merged. Open follow-ups tracked as GitHub issues.
+The multi-track manifest-handling tech-spec driving recent work lives in an
+internal (non-public) spec repo. Tracks D (conventions) / A (hash catalog +
+drift) / C (overlay) / B (globs) are all merged, so their outcome is fully
+described by `MANIFEST.md` plus the code. Open follow-ups are tracked as GitHub
+issues on this repo.
 
 ## Don't do these
 

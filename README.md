@@ -9,87 +9,30 @@ commit as plaintext. MVP targets **OpenClaw** only.
 
 ## Quick Install / Upgrade
 
-The argit repo is private. Installation uses a bundled read-only deploy key
-to clone over SSH. Copy-paste this block (it sets up the SSH key + Host
-alias once, then installs/upgrades to whatever ref is at the end —
-**re-run the same block to upgrade**):
-
 ```sh
-mkdir -p ~/.ssh && chmod 700 ~/.ssh
-touch ~/.ssh/config && chmod 600 ~/.ssh/config
-
-cat > ~/.ssh/argit-deploy <<'EOF'
------BEGIN OPENSSH PRIVATE KEY-----
-b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
-QyNTUxOQAAACCbHQz3D+jQgiaKYDWXdsf/LGvw0GJWm3y6h3snQNVNzwAAAJjbdI4O23SO
-DgAAAAtzc2gtZWQyNTUxOQAAACCbHQz3D+jQgiaKYDWXdsf/LGvw0GJWm3y6h3snQNVNzw
-AAAEAiLVilcVJz2bSoI5QY4qH5W4ECMGmNWl4jGeBLuwhO4JsdDPcP6NCCJopgNZd2x/8s
-a/DQYlabfLqHeydA1U3PAAAAFWFyZ2l0LWRlcGxveS1yZWFkb25seQ==
------END OPENSSH PRIVATE KEY-----
-EOF
-chmod 600 ~/.ssh/argit-deploy
-
-if ! grep -q "^Host github-argit$" ~/.ssh/config 2>/dev/null; then
-  cat >> ~/.ssh/config <<EOF
-
-Host github-argit
-  Hostname github.com
-  User git
-  IdentityFile ~/.ssh/argit-deploy
-  IdentitiesOnly yes
-EOF
-fi
-
-# Pin GitHub's ED25519 host key (idempotent). Avoids the non-interactive
-# "Host key verification failed" error on fresh hosts where pipx/uv can't
-# accept the key on first connection. Key fetched from api.github.com/meta.
-touch ~/.ssh/known_hosts && chmod 600 ~/.ssh/known_hosts
-if ! grep -q "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" ~/.ssh/known_hosts 2>/dev/null; then
-  echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" >> ~/.ssh/known_hosts
-fi
-
-argit_install() {
-  local URL="git+ssh://git@github-argit/blinkbitcoin/argit.git@${1:-main}"
-  if command -v uv >/dev/null 2>&1; then
-    uv tool install --force "$URL" || return $?
-  elif command -v pipx >/dev/null 2>&1; then
-    pipx install --force "$URL" || return $?
-  else
-    echo "neither uv nor pipx found — install one first" >&2; return 1
-  fi
-  argit --version
-}; argit_install main
+uv tool install --force git+https://github.com/blinkbitcoin/argit.git@main
+argit --version
 ```
 
-The trailing word — `main` — is the git ref. To install or upgrade to a
-different ref, hit **Ctrl-E** to jump to end-of-line, replace `main` with
-`v1.2.0` (or any tag/branch/SHA), and hit Enter. Re-running with the same
-ref reinstalls (use this to pick up new commits on `main`).
+Or with `pipx`:
+
+```sh
+pipx install --force git+https://github.com/blinkbitcoin/argit.git@main
+```
+
+The trailing ref — `main` — is any tag, branch, or SHA. Re-run the same command
+to upgrade: with the same ref to pick up new commits, or with a different one
+(`@v1`, `@v1.11.0`) to move releases.
+
+There is also a bootstrap script (used in the six-step flow below) that picks
+whichever of `uv` / `pipx` is present; it installs the `v1` tag by default,
+overridable with `ARGIT_TAG`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/blinkbitcoin/argit/main/install.sh | bash
+```
 
 If `argit` isn't on PATH after install, run `pipx ensurepath` and `source ~/.bashrc` (or `~/.zshrc`).
-
-### About the bundled deploy key
-
-The key above has **read-only** access scoped to `blinkbitcoin/argit` (no write,
-no other repos, no user). Anyone with the README contents can clone argit;
-that's the trade-off chosen for `curl|paste|bash` UX over a private repo.
-GitHub permits this pattern for read-only deploy keys. If the key needs
-rotation, ship a new argit release with an updated README and revoke the old
-deploy key on the repo.
-
-### Alternative install methods
-
-If you have your own SSH key registered with GitHub and read access to the repo:
-
-```sh
-uv tool install git+ssh://git@github.com/blinkbitcoin/argit.git@main
-```
-
-If you have `gh` authenticated:
-
-```sh
-gh repo clone blinkbitcoin/argit /tmp/argit && pipx install /tmp/argit
-```
 
 ## Six-Step Bootstrap
 
@@ -286,9 +229,8 @@ Two recommended setups:
 1. **GitHub CLI**: `gh auth login` — handles HTTPS remotes out of the box.
 2. **Personal SSH key**: set up GitHub with SSH as usual; `git push` Just Works.
 
-Advanced (deploy-key-in-pass pattern): see
-[bot-provisioning-poc/scripts/on_host/secrets_setup.sh](https://github.com/blinkbitcoin/bot-provisioning-poc/blob/main/scripts/on_host/secrets_setup.sh).
-Automated deploy-key setup is planned for a later QS; out of MVP scope.
+Automated deploy-key setup (storing a per-repo deploy key in the pass store) is
+out of MVP scope.
 
 ### `UnicodeEncodeError` mid-command (`LANG=C` containers)
 
@@ -331,8 +273,7 @@ stderr before exec, `argit doctor` previews commands, `--skip-lifecycle`
 bypasses), supply-chain compromise of argit itself, or compromised GPG private
 keys.
 
-See [tech-spec-01-mvp.md](argit/implementation-artifacts/tech-spec-01-mvp.md)
-and [MANIFEST.md](MANIFEST.md) for design rationale and manifest authoring.
+See [MANIFEST.md](MANIFEST.md) for design rationale and manifest authoring.
 
 ## License
 
