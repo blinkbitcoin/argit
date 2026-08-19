@@ -336,4 +336,4 @@ and [MANIFEST.md](MANIFEST.md) for design rationale and manifest authoring.
 
 ## License
 
-MIT.
+MIT — see [LICENSE](LICENSE).
